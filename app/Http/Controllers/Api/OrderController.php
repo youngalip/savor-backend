@@ -8,12 +8,19 @@ use App\Models\OrderItem;
 use App\Models\Customer;
 use App\Models\Table;
 use App\Models\Menu;
+use App\Services\EmailService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 
 class OrderController extends Controller
 {
+    protected $emailService;
+
+    public function __construct(EmailService $emailService)
+    {
+        $this->emailService = $emailService;
+    }
     public function store(Request $request)
     {
         $request->validate([
@@ -39,36 +46,65 @@ class OrderController extends Controller
                 ], 401);
             }
 
-            // 2. Update email customer
-            $customer->update(['email' => $request->email]);
-
-            // 3. Cari table yang sedang occupied oleh customer ini
-            $table = Table::where('status', 'Occupied')->first(); // Simplified untuk demo
-            
-            if (!$table) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Meja tidak ditemukan'
-                ], 404);
-            }
-
-            // 4. Hitung total amount
-            $totalAmount = 0;
+            // 2. STOCK VALIDATION - Check semua items dulu sebelum create order
+            $stockErrors = [];
             $orderItems = [];
+            $totalAmount = 0;
 
             foreach ($request->items as $item) {
                 $menu = Menu::find($item['menu_id']);
+                
+                // Check stock availability
+                if ($menu->stock_quantity < $item['quantity']) {
+                    $stockErrors[] = [
+                        'menu_name' => $menu->name,
+                        'requested' => $item['quantity'],
+                        'available' => $menu->stock_quantity
+                    ];
+                    continue;
+                }
+
                 $subtotal = $menu->price * $item['quantity'];
                 $totalAmount += $subtotal;
 
                 $orderItems[] = [
-                    'menu_id' => $menu->id,
+                    'menu' => $menu,
                     'quantity' => $item['quantity'],
                     'price' => $menu->price,
                     'subtotal' => $subtotal,
                     'special_notes' => $item['special_notes'] ?? null,
                     'status' => 'Pending'
                 ];
+            }
+
+            // Jika ada stock errors, return error
+            if (!empty($stockErrors)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Beberapa item tidak tersedia',
+                    'data' => [
+                        'stock_errors' => $stockErrors,
+                        'available_items' => array_map(function($item) {
+                            return [
+                                'menu_name' => $item['menu']->name,
+                                'available_stock' => $item['menu']->stock_quantity
+                            ];
+                        }, $orderItems)
+                    ]
+                ], 400);
+            }
+
+            // 3. Update email customer
+            $customer->update(['email' => $request->email]);
+
+            // 4. Cari table
+            $table = Table::where('status', 'Occupied')->first(); // Simplified
+            
+            if (!$table) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Meja tidak ditemukan'
+                ], 404);
             }
 
             // 5. Generate order number
@@ -86,12 +122,25 @@ class OrderController extends Controller
                 'session_expires_at' => now()->addHours(2)
             ]);
 
-            // 7. Create order items
+            // 7. Create order items AND update stock
             foreach ($orderItems as $itemData) {
-                $order->items()->create($itemData);
+                $order->items()->create([
+                    'menu_id' => $itemData['menu']->id,
+                    'quantity' => $itemData['quantity'],
+                    'price' => $itemData['price'],
+                    'subtotal' => $itemData['subtotal'],
+                    'special_notes' => $itemData['special_notes'],
+                    'status' => $itemData['status']
+                ]);
+
+                // UPDATE STOCK - Reduce quantity
+                $itemData['menu']->decrement('stock_quantity', $itemData['quantity']);
             }
 
             DB::commit();
+
+            // Send order confirmation email
+            $this->emailService->sendOrderConfirmation($order);
 
             return response()->json([
                 'success' => true,
@@ -101,12 +150,31 @@ class OrderController extends Controller
                     'order_number' => $order->order_number,
                     'total_amount' => $order->total_amount,
                     'items_count' => count($orderItems),
-                    'table_number' => $table->table_number
+                    'table_number' => $table->table_number,
+                    'email_sent' => true // Indicate email was sent
+                ]
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Order berhasil dibuat',
+                'data' => [
+                    'order_uuid' => $order->order_uuid,
+                    'order_number' => $order->order_number,
+                    'total_amount' => $order->total_amount,
+                    'items_count' => count($orderItems),
+                    'table_number' => $table->table_number,
+                    'estimated_completion' => now()->addMinutes(20)->format('H:i')
                 ]
             ]);
 
         } catch (\Exception $e) {
             DB::rollback();
+            
+            \Log::error('Order creation failed: ' . $e->getMessage(), [
+                'session_token' => $request->session_token,
+                'items' => $request->items
+            ]);
             
             return response()->json([
                 'success' => false,

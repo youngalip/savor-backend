@@ -33,7 +33,8 @@ class MenuController extends Controller
     {
         try {
             $query = Menu::with('category')
-                         ->where('is_available', true);
+                        ->where('is_available', true)
+                        ->where('stock_quantity', '>', 0); // Only show items with stock
 
             // Filter by category
             if ($request->has('category_id')) {
@@ -46,8 +47,14 @@ class MenuController extends Controller
             }
 
             $menus = $query->orderBy('display_order')
-                          ->orderBy('name')
-                          ->get();
+                        ->orderBy('name')
+                        ->get()
+                        ->map(function($menu) {
+                            // Add stock status info
+                            $menu->stock_status = $menu->stock_quantity <= $menu->minimum_stock ? 'low' : 'normal';
+                            $menu->is_low_stock = $menu->stock_quantity <= $menu->minimum_stock;
+                            return $menu;
+                        });
 
             return response()->json([
                 'success' => true,
@@ -57,9 +64,9 @@ class MenuController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal mengambil data menu'
-            ], 500);
-        }
+        ], 500);
     }
+}
 
     public function show($id)
     {

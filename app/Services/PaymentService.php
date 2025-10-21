@@ -18,6 +18,7 @@ class PaymentService
         Config::$isProduction = config('midtrans.is_production');
         Config::$isSanitized = config('midtrans.is_sanitized');
         Config::$is3ds = config('midtrans.is_3ds');
+        $this->emailService = new EmailService();
     }
 
     public function createSnapToken(Order $order)
@@ -136,7 +137,10 @@ class PaymentService
                 'payment_reference' => $transactionId,
                 'paid_at' => $paymentStatus === 'Paid' ? now() : null
             ]);
-
+            // Send payment receipt email if paid
+            if ($paymentStatus === 'Paid') {
+                $this->emailService->sendPaymentReceipt($order->fresh(['customer', 'table', 'items.menu']));
+            }
             // Log payment result
             PaymentLog::create([
                 'order_id' => $order->id,
