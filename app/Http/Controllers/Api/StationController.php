@@ -18,14 +18,9 @@ class StationController extends Controller
      * Dikelompokkan per meja
      * 
      * GET /api/v1/staff/stations/{station_type}/orders
-     * 
-     * @param string $stationType kitchen|bar|pastry
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function getOrdersByStation(string $stationType, Request $request)
     {
-        // Validasi station type
         if (!StationAssignmentService::isValidStation($stationType)) {
             return response()->json([
                 'success' => false,
@@ -33,7 +28,6 @@ class StationController extends Controller
             ], 400);
         }
 
-        // Get category IDs untuk station ini
         $categoryIds = StationAssignmentService::getCategoryIdsByStation($stationType);
 
         if (empty($categoryIds)) {
@@ -47,7 +41,6 @@ class StationController extends Controller
             ]);
         }
 
-        // Query order items
         $query = OrderItem::with([
             'menu.category',
             'order.table'
@@ -56,22 +49,18 @@ class StationController extends Controller
             $q->whereIn('category_id', $categoryIds);
         })
         ->whereHas('order', function ($q) {
-            // Hanya ambil order yang sudah dibayar
             $q->where('payment_status', 'Paid');
         });
 
-        // Filter by status (optional)
         if ($request->has('status')) {
             $status = $request->input('status');
             if (in_array(ucfirst(strtolower($status)), ['Pending', 'Done'])) {
                 $query->where('status', ucfirst(strtolower($status)));
             }
         } else {
-            // Default: hanya tampilkan yang pending
             $query->where('status', 'Pending');
         }
 
-        // Filter by date (optional)
         if ($request->has('date')) {
             $date = $request->input('date');
             $query->whereDate('created_at', $date);
@@ -79,12 +68,10 @@ class StationController extends Controller
 
         $orderItems = $query->orderBy('created_at', 'asc')->get();
 
-        // Group by table
         $groupedByTable = $orderItems->groupBy(function ($item) {
             return $item->order->table_id;
         });
 
-        // Format response
         $ordersData = [];
         foreach ($groupedByTable as $tableId => $items) {
             $firstItem = $items->first();
@@ -106,7 +93,7 @@ class StationController extends Controller
                         'menu_name' => $item->menu->name,
                         'category_name' => $item->menu->category->name,
                         'quantity' => $item->quantity,
-                        'status' => strtolower($item->status), // Convert to lowercase for frontend
+                        'status' => strtolower($item->status),
                         'special_notes' => $item->special_notes ?? null,
                         'created_at' => $item->created_at->toDateTimeString(),
                     ];
@@ -114,7 +101,6 @@ class StationController extends Controller
             ];
         }
 
-        // Sort by order created time (oldest first)
         usort($ordersData, function ($a, $b) {
             return strtotime($a['order_created_at']) - strtotime($b['order_created_at']);
         });
@@ -134,10 +120,6 @@ class StationController extends Controller
      * Update status order item (Pending -> Done)
      * 
      * PATCH /api/v1/staff/stations/items/{id}/status
-     * 
-     * @param int $itemId
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function updateItemStatus($itemId, Request $request)
     {
@@ -162,7 +144,6 @@ class StationController extends Controller
             ], 404);
         }
 
-        // Validasi: order harus sudah dibayar
         if ($orderItem->order->payment_status !== 'Paid') {
             return response()->json([
                 'success' => false,
@@ -171,7 +152,7 @@ class StationController extends Controller
         }
 
         $oldStatus = $orderItem->status;
-        $newStatus = ucfirst(strtolower($request->input('status'))); // Normalize to Pending/Done
+        $newStatus = ucfirst(strtolower($request->input('status')));
 
         $orderItem->status = $newStatus;
         $orderItem->save();
@@ -193,9 +174,6 @@ class StationController extends Controller
      * Batch update status untuk multiple items
      * 
      * POST /api/v1/staff/stations/items/batch-update-status
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function batchUpdateStatus(Request $request)
     {
@@ -214,7 +192,7 @@ class StationController extends Controller
         }
 
         $itemIds = $request->input('item_ids');
-        $newStatus = ucfirst(strtolower($request->input('status'))); // Normalize
+        $newStatus = ucfirst(strtolower($request->input('status')));
 
         DB::beginTransaction();
         try {
@@ -247,12 +225,9 @@ class StationController extends Controller
 
     /**
      * Get menu list untuk station tertentu
-     * Untuk keperluan edit stock
+     * 🔥 UPDATED: Include subcategory field
      * 
      * GET /api/v1/staff/stations/{station_type}/menus
-     * 
-     * @param string $stationType
-     * @return \Illuminate\Http\JsonResponse
      */
     public function getMenusByStation(string $stationType)
     {
@@ -269,7 +244,11 @@ class StationController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'No menus found for this station',
-                'data' => [],
+                'data' => [
+                    'station_type' => $stationType,
+                    'total_menus' => 0,
+                    'menus' => [],
+                ],
             ]);
         }
 
@@ -282,9 +261,10 @@ class StationController extends Controller
                     'id' => $menu->id,
                     'name' => $menu->name,
                     'category_name' => $menu->category->name,
+                    'subcategory' => $menu->subcategory ?? null, // 🔥 ADDED
                     'price' => (float) $menu->price,
-                    'stock_quantity' => $menu->stock_quantity ?? null,
-                    'minimum_stock' => $menu->minimum_stock ?? null,
+                    'stock_quantity' => $menu->stock_quantity ?? 0,
+                    'minimum_stock' => $menu->minimum_stock ?? 0,
                     'is_available' => $menu->is_available ?? true,
                     'image_url' => $menu->image_url ?? null,
                     'preparation_time' => $menu->preparation_time ?? null,
@@ -305,11 +285,6 @@ class StationController extends Controller
      * Update stock menu (hanya stock_quantity, minimum_stock, is_available)
      * 
      * PATCH /api/v1/staff/stations/{station_type}/menus/{id}/stock
-     * 
-     * @param string $stationType
-     * @param int $menuId
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function updateMenuStock(string $stationType, $menuId, Request $request)
     {
@@ -343,7 +318,6 @@ class StationController extends Controller
             ], 404);
         }
 
-        // Validasi: menu harus sesuai dengan station
         $menuStation = StationAssignmentService::getStationFromCategory($menu->category->name);
         if ($menuStation !== $stationType) {
             return response()->json([
@@ -352,7 +326,6 @@ class StationController extends Controller
             ], 403);
         }
 
-        // Update hanya field yang diizinkan
         $updated = [];
         if ($request->has('stock_quantity')) {
             $menu->stock_quantity = $request->input('stock_quantity');
@@ -389,10 +362,6 @@ class StationController extends Controller
      * Get dashboard statistics untuk station
      * 
      * GET /api/v1/staff/stations/{station_type}/stats
-     * 
-     * @param string $stationType
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function getStationStats(string $stationType, Request $request)
     {
@@ -404,11 +373,8 @@ class StationController extends Controller
         }
 
         $categoryIds = StationAssignmentService::getCategoryIdsByStation($stationType);
-
-        // Date filter (default: today)
         $date = $request->input('date', now()->toDateString());
 
-        // Count items by status
         $baseQuery = OrderItem::whereHas('menu', function ($q) use ($categoryIds) {
             $q->whereIn('category_id', $categoryIds);
         })
@@ -421,7 +387,6 @@ class StationController extends Controller
         $pendingItems = (clone $baseQuery)->where('status', 'Pending')->count();
         $doneItems = (clone $baseQuery)->where('status', 'Done')->count();
 
-        // Get active orders (have pending items)
         $activeOrders = OrderItem::whereHas('menu', function ($q) use ($categoryIds) {
             $q->whereIn('category_id', $categoryIds);
         })
@@ -433,7 +398,6 @@ class StationController extends Controller
         ->distinct('order_id')
         ->count('order_id');
 
-        // Low stock items (if stock columns exist)
         $lowStockItems = 0;
         try {
             $lowStockItems = Menu::whereIn('category_id', $categoryIds)
