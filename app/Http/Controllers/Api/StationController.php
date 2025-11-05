@@ -17,7 +17,7 @@ class StationController extends Controller
      * Get order items berdasarkan station type (kitchen/bar/pastry)
      * Dikelompokkan per meja
      * 
-     * GET /api/v1/stations/{station_type}/orders
+     * GET /api/v1/staff/stations/{station_type}/orders
      * 
      * @param string $stationType kitchen|bar|pastry
      * @param Request $request
@@ -50,8 +50,7 @@ class StationController extends Controller
         // Query order items
         $query = OrderItem::with([
             'menu.category',
-            'order.table',
-            'order.customer'
+            'order.table'
         ])
         ->whereHas('menu', function ($q) use ($categoryIds) {
             $q->whereIn('category_id', $categoryIds);
@@ -64,20 +63,18 @@ class StationController extends Controller
         // Filter by status (optional)
         if ($request->has('status')) {
             $status = $request->input('status');
-            if (in_array(strtolower($status), ['pending', 'done'])) {
+            if (in_array(ucfirst(strtolower($status)), ['Pending', 'Done'])) {
                 $query->where('status', ucfirst(strtolower($status)));
             }
+        } else {
+            // Default: hanya tampilkan yang pending
+            $query->where('status', 'Pending');
         }
 
         // Filter by date (optional)
         if ($request->has('date')) {
             $date = $request->input('date');
             $query->whereDate('created_at', $date);
-        }
-
-        // Default: hanya tampilkan yang pending
-        if (!$request->has('status')) {
-            $query->where('status', 'Pending');
         }
 
         $orderItems = $query->orderBy('created_at', 'asc')->get();
@@ -100,7 +97,7 @@ class StationController extends Controller
                 'order_id' => $order->id,
                 'order_number' => $order->order_number,
                 'order_created_at' => $order->created_at->toDateTimeString(),
-                'customer_name' => $order->customer->name ?? 'Guest',
+                'customer_name' => $order->customer_name ?? 'Guest',
                 'items_count' => $items->count(),
                 'items' => $items->map(function ($item) {
                     return [
@@ -109,10 +106,9 @@ class StationController extends Controller
                         'menu_name' => $item->menu->name,
                         'category_name' => $item->menu->category->name,
                         'quantity' => $item->quantity,
-                        'status' => $item->status,
-                        'special_notes' => $item->special_notes,
+                        'status' => strtolower($item->status), // Convert to lowercase for frontend
+                        'special_notes' => $item->special_notes ?? null,
                         'created_at' => $item->created_at->toDateTimeString(),
-                        'preparation_time' => $item->menu->preparation_time,
                     ];
                 })->values(),
             ];
@@ -137,7 +133,7 @@ class StationController extends Controller
     /**
      * Update status order item (Pending -> Done)
      * 
-     * PATCH /api/v1/stations/items/{id}/status
+     * PATCH /api/v1/staff/stations/items/{id}/status
      * 
      * @param int $itemId
      * @param Request $request
@@ -146,7 +142,7 @@ class StationController extends Controller
     public function updateItemStatus($itemId, Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'status' => 'required|string|in:Pending,Done',
+            'status' => 'required|string|in:Pending,Done,pending,done',
         ]);
 
         if ($validator->fails()) {
@@ -175,7 +171,7 @@ class StationController extends Controller
         }
 
         $oldStatus = $orderItem->status;
-        $newStatus = $request->input('status');
+        $newStatus = ucfirst(strtolower($request->input('status'))); // Normalize to Pending/Done
 
         $orderItem->status = $newStatus;
         $orderItem->save();
@@ -196,7 +192,7 @@ class StationController extends Controller
     /**
      * Batch update status untuk multiple items
      * 
-     * POST /api/v1/stations/items/batch-update-status
+     * POST /api/v1/staff/stations/items/batch-update-status
      * 
      * @param Request $request
      * @return \Illuminate\Http\JsonResponse
@@ -206,7 +202,7 @@ class StationController extends Controller
         $validator = Validator::make($request->all(), [
             'item_ids' => 'required|array',
             'item_ids.*' => 'required|integer|exists:order_items,id',
-            'status' => 'required|string|in:Pending,Done',
+            'status' => 'required|string|in:Pending,Done,pending,done',
         ]);
 
         if ($validator->fails()) {
@@ -218,7 +214,7 @@ class StationController extends Controller
         }
 
         $itemIds = $request->input('item_ids');
-        $newStatus = $request->input('status');
+        $newStatus = ucfirst(strtolower($request->input('status'))); // Normalize
 
         DB::beginTransaction();
         try {
@@ -253,7 +249,7 @@ class StationController extends Controller
      * Get menu list untuk station tertentu
      * Untuk keperluan edit stock
      * 
-     * GET /api/v1/stations/{station_type}/menus
+     * GET /api/v1/staff/stations/{station_type}/menus
      * 
      * @param string $stationType
      * @return \Illuminate\Http\JsonResponse
@@ -287,11 +283,11 @@ class StationController extends Controller
                     'name' => $menu->name,
                     'category_name' => $menu->category->name,
                     'price' => (float) $menu->price,
-                    'stock_quantity' => $menu->stock_quantity,
-                    'minimum_stock' => $menu->minimum_stock,
-                    'is_available' => $menu->is_available,
-                    'image_url' => $menu->image_url,
-                    'preparation_time' => $menu->preparation_time,
+                    'stock_quantity' => $menu->stock_quantity ?? null,
+                    'minimum_stock' => $menu->minimum_stock ?? null,
+                    'is_available' => $menu->is_available ?? true,
+                    'image_url' => $menu->image_url ?? null,
+                    'preparation_time' => $menu->preparation_time ?? null,
                 ];
             });
 
@@ -308,7 +304,7 @@ class StationController extends Controller
     /**
      * Update stock menu (hanya stock_quantity, minimum_stock, is_available)
      * 
-     * PATCH /api/v1/stations/{station_type}/menus/{id}/stock
+     * PATCH /api/v1/staff/stations/{station_type}/menus/{id}/stock
      * 
      * @param string $stationType
      * @param int $menuId
@@ -392,7 +388,7 @@ class StationController extends Controller
     /**
      * Get dashboard statistics untuk station
      * 
-     * GET /api/v1/stations/{station_type}/stats
+     * GET /api/v1/staff/stations/{station_type}/stats
      * 
      * @param string $stationType
      * @param Request $request
@@ -437,11 +433,16 @@ class StationController extends Controller
         ->distinct('order_id')
         ->count('order_id');
 
-        // Low stock items
-        $lowStockItems = Menu::whereIn('category_id', $categoryIds)
-            ->whereColumn('stock_quantity', '<=', 'minimum_stock')
-            ->where('is_available', true)
-            ->count();
+        // Low stock items (if stock columns exist)
+        $lowStockItems = 0;
+        try {
+            $lowStockItems = Menu::whereIn('category_id', $categoryIds)
+                ->whereColumn('stock_quantity', '<=', 'minimum_stock')
+                ->where('is_available', true)
+                ->count();
+        } catch (\Exception $e) {
+            // Skip if stock columns don't exist
+        }
 
         return response()->json([
             'success' => true,
