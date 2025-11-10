@@ -35,9 +35,10 @@ Route::prefix('v1')->group(function () {
     require __DIR__ . '/api/cashier.php';
     
     // ==========================================
-    // ADMIN ROUTES
+    // OWNER & ADMIN ROUTES
     // ==========================================
     require __DIR__ . '/api/admin.php';
+    require __DIR__ . '/api/owner.php';
     
     // ==========================================
     // TESTING ROUTES (Disable in production!)
