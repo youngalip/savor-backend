@@ -41,6 +41,11 @@ Route::prefix('v1')->group(function () {
     require __DIR__ . '/api/owner.php';
     
     // ==========================================
+    // OWNER & ADMIN ROUTES
+    // ==========================================
+    require __DIR__ . '/api/auth.php';
+
+    // ==========================================
     // TESTING ROUTES (Disable in production!)
     // ==========================================
     if (config('app.env') !== 'production') {
