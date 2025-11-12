@@ -4,11 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Order;
-use App\Models\OrderItem;
 use App\Models\Customer;
 use App\Models\Table;
 use App\Models\Menu;
-use App\Models\Setting;
 use App\Services\EmailService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
@@ -24,30 +22,27 @@ class OrderController extends Controller
         $this->emailService = $emailService;
     }
 
-
     /**
-     * Create new order with tax & service charge calculation
-     * 
      * POST /api/v1/orders
      */
     public function store(Request $request)
     {
         $request->validate([
-            'session_token' => 'required|string',
-            'email' => 'required|email',
-            'items' => 'required|array|min:1',
-            'items.*.menu_id' => 'required|exists:menus,id',
-            'items.*.quantity' => 'required|integer|min:1',
-            'items.*.special_notes' => 'nullable|string|max:500',
-            'notes' => 'nullable|string'
+            'session_token'          => 'required|string',
+            'payment_method'         => 'required|in:cash,non_cash',
+            'email'                  => 'nullable|email|required_if:payment_method,non_cash',
+            'items'                  => 'required|array|min:1',
+            'items.*.menu_id'        => 'required|exists:menus,id',
+            'items.*.quantity'       => 'required|integer|min:1',
+            'items.*.special_notes'  => 'nullable|string|max:500',
+            'notes'                  => 'nullable|string'
         ]);
 
         try {
             DB::beginTransaction();
 
-            // 1. Validasi customer & session
+            // 1) Validasi customer
             $customer = Customer::where('session_token', $request->session_token)->first();
-            
             if (!$customer) {
                 return response()->json([
                     'success' => false,
@@ -55,37 +50,33 @@ class OrderController extends Controller
                 ], 401);
             }
 
-            // 2. Update email customer
-            $customer->update(['email' => $request->email]);
+            // Rekam email/ip/UA/last activity
+            if ($request->filled('email')) {
+                $customer->email = $request->email;
+            }
+            $customer->ip_address    = $request->ip();
+            $customer->user_agent    = $request->header('User-Agent');
+            $customer->last_activity = now();
+            $customer->save();
 
-            // 3. Get table
-            // Coba get table_id dari customer dulu
-            $table = null;
-            if (isset($customer->table_id)) {
-                $table = Table::find($customer->table_id);
-            }
-            
-            // Fallback: cari table yang Occupied
+            // 2) Tentukan meja (tanpa asumsi customers.table_id)
+            //    - jika ada meja 'Occupied' pakai itu, kalau tidak ada, error
+            $table = Table::where('status', 'Occupied')->first();
             if (!$table) {
-                $table = Table::where('status', 'Occupied')->first();
-            }
-            
-            if (!$table) {
+                DB::rollBack();
                 return response()->json([
                     'success' => false,
                     'message' => 'Meja tidak ditemukan'
                 ], 404);
             }
 
-            // 4. STOCK VALIDATION - Check semua items dulu sebelum create order
+            // 3) Validasi stok + subtotal
             $stockErrors = [];
             $orderItems = [];
             $itemsSubtotal = 0;
 
             foreach ($request->items as $item) {
                 $menu = Menu::find($item['menu_id']);
-                
-                // Check stock availability
                 if ($menu->stock_quantity < $item['quantity']) {
                     $stockErrors[] = [
                         'menu_name' => $menu->name,
@@ -99,123 +90,108 @@ class OrderController extends Controller
                 $itemsSubtotal += $subtotal;
 
                 $orderItems[] = [
-                    'menu' => $menu,
-                    'quantity' => $item['quantity'],
-                    'price' => $menu->price,
-                    'subtotal' => $subtotal,
+                    'menu'          => $menu,
+                    'quantity'      => $item['quantity'],
+                    'price'         => $menu->price,
+                    'subtotal'      => $subtotal,
                     'special_notes' => $item['special_notes'] ?? null,
-                    'status' => 'Pending'
+                    'status'        => 'Pending'
                 ];
             }
 
-            // Jika ada stock errors, return error
             if (!empty($stockErrors)) {
-                DB::rollback();
+                DB::rollBack();
                 return response()->json([
                     'success' => false,
                     'message' => 'Beberapa item tidak tersedia',
-                    'data' => [
-                        'stock_errors' => $stockErrors,
-                        'available_items' => array_map(function($item) {
-                            return [
-                                'menu_name' => $item['menu']->name,
-                                'available_stock' => $item['menu']->stock_quantity
-                            ];
-                        }, $orderItems)
-                    ]
+                    'data' => ['stock_errors' => $stockErrors]
                 ], 400);
             }
 
-            // 5. Generate order number
+            // 4) Nomor order
             $orderNumber = $this->generateOrderNumber();
 
-            // 6. Create order instance (jangan save dulu)
+            // 5) Buat order
             $order = new Order([
-                'order_uuid' => (string) Str::uuid(),
-                'order_number' => $orderNumber,
-                'customer_id' => $customer->id,
-                'table_id' => $table->id,
-                'notes' => $request->notes,
-                'payment_status' => 'Pending',
-                'session_expires_at' => now()->addHours(2)
+                'order_uuid'         => (string) Str::uuid(),
+                'order_number'       => $orderNumber,
+                'customer_id'        => $customer->id,
+                'table_id'           => $table->id,
+                'notes'              => $request->notes,
+                'payment_status'     => 'Pending',
+                'session_expires_at' => now()->addHours(2),
             ]);
 
-            // 7. Calculate pricing dengan tax & service charge
+            // 6) Hitung pricing
             $order->calculatePricing($itemsSubtotal);
-
-            // 8. Save order
             $order->save();
 
-            // 9. Create order items AND update stock
+            // 7) Simpan item & kurangi stok
             foreach ($orderItems as $itemData) {
                 $order->items()->create([
-                    'menu_id' => $itemData['menu']->id,
-                    'quantity' => $itemData['quantity'],
-                    'price' => $itemData['price'],
-                    'subtotal' => $itemData['subtotal'],
+                    'menu_id'       => $itemData['menu']->id,
+                    'quantity'      => $itemData['quantity'],
+                    'price'         => $itemData['price'],
+                    'subtotal'      => $itemData['subtotal'],
                     'special_notes' => $itemData['special_notes'],
-                    'status' => $itemData['status']
+                    'status'        => $itemData['status']
                 ]);
 
-                // UPDATE STOCK - Reduce quantity
                 $itemData['menu']->decrement('stock_quantity', $itemData['quantity']);
             }
 
             DB::commit();
 
-            // 10. Send order confirmation email
+            // 8) Email konfirmasi (opsional)
             $emailSent = false;
             try {
-                $this->emailService->sendOrderConfirmation($order);
-                $emailSent = true;
+                if ($request->payment_method === 'non_cash' && $customer->email) {
+                    $this->emailService->sendOrderConfirmation($order);
+                    $emailSent = true;
+                }
             } catch (\Exception $e) {
                 Log::warning('Failed to send order email: ' . $e->getMessage());
             }
 
-            // 11. Return response dengan breakdown lengkap
             return response()->json([
                 'success' => true,
                 'message' => 'Order berhasil dibuat',
                 'data' => [
-                    'order_uuid' => $order->order_uuid,
-                    'order_number' => $order->order_number,
-                    'breakdown' => $order->breakdown,
-                    'items_count' => count($orderItems),
-                    'table_number' => $table->table_number,
-                    'email_sent' => $emailSent,
-                    'payment_status' => $order->payment_status,
+                    'order_uuid'         => $order->order_uuid,
+                    'order_number'       => $order->order_number,
+                    'breakdown'          => $order->breakdown,
+                    'items_count'        => $order->items()->count(),
+                    'table_number'       => $table->table_number,
+                    'email_sent'         => $emailSent,
+                    'payment_status'     => $order->payment_status,
+                    'total_amount'       => (float) $order->total_amount,
                     'session_expires_at' => $order->session_expires_at->format('Y-m-d H:i:s')
                 ]
             ]);
-
         } catch (\Exception $e) {
-            DB::rollback();
-            
+            DB::rollBack();
             Log::error('Order creation failed: ' . $e->getMessage(), [
                 'session_token' => $request->session_token,
-                'items' => $request->items,
-                'trace' => $e->getTraceAsString()
+                'items'         => $request->items,
             ]);
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal membuat order',
-                'error' => config('app.debug') ? $e->getMessage() : null
+                'error'   => config('app.debug') ? $e->getMessage() : null
             ], 500);
         }
     }
 
     /**
-     * Get order by UUID
-     * 
      * GET /api/v1/orders/{uuid}
      */
     public function show($uuid)
     {
         try {
             $order = Order::with(['items.menu', 'table', 'customer'])
-                          ->where('order_uuid', $uuid)
-                          ->first();
+                ->where('order_uuid', $uuid)
+                ->first();
 
             if (!$order) {
                 return response()->json([
@@ -226,11 +202,11 @@ class OrderController extends Controller
 
             return response()->json([
                 'success' => true,
-                'data' => $order
+                'data'    => $order
             ]);
         } catch (\Exception $e) {
             Log::error('Failed to retrieve order: ' . $e->getMessage());
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal mengambil data order'
@@ -239,22 +215,13 @@ class OrderController extends Controller
     }
 
     /**
-     * Calculate order preview (before creating order)
-     * 
      * POST /api/v1/orders/calculate
-     * 
-     * Body: {
-     *   "items": [
-     *     { "menu_id": 1, "quantity": 2 },
-     *     { "menu_id": 5, "quantity": 1 }
-     *   ]
-     * }
      */
     public function calculatePreview(Request $request)
     {
         $request->validate([
-            'items' => 'required|array|min:1',
-            'items.*.menu_id' => 'required|exists:menus,id',
+            'items'            => 'required|array|min:1',
+            'items.*.menu_id'  => 'required|exists:menus,id',
             'items.*.quantity' => 'required|integer|min:1'
         ]);
 
@@ -268,27 +235,26 @@ class OrderController extends Controller
                 $itemsSubtotal += $subtotal;
 
                 $itemsDetail[] = [
-                    'menu_id' => $menu->id,
+                    'menu_id'   => $menu->id,
                     'menu_name' => $menu->name,
-                    'price' => (float) $menu->price,
-                    'quantity' => $item['quantity'],
-                    'subtotal' => $subtotal
+                    'price'     => (float) $menu->price,
+                    'quantity'  => $item['quantity'],
+                    'subtotal'  => $subtotal
                 ];
             }
 
-            // Calculate pricing breakdown using Order model static method
             $breakdown = Order::calculatePricingBreakdown($itemsSubtotal);
 
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'items' => $itemsDetail,
+                    'items'     => $itemsDetail,
                     'breakdown' => $breakdown
                 ]
             ]);
         } catch (\Exception $e) {
             Log::error('Calculate preview failed: ' . $e->getMessage());
-            
+
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal menghitung preview order'
@@ -297,16 +263,72 @@ class OrderController extends Controller
     }
 
     /**
-     * Get order history by device ID (permanent history)
-     * 
-     * GET /api/v1/orders/history/device
-     * Query param: device_id
+     * GET /api/v1/orders/history/{sessionToken}
+     */
+    public function history($sessionToken)
+    {
+        try {
+            $customer = Customer::where('session_token', $sessionToken)->first();
+            if (!$customer) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Session tidak valid'
+                ], 401);
+            }
+
+            $allOrders = Order::select([
+                    'id','order_uuid','order_number','customer_id','table_id',
+                    'subtotal','service_charge_amount','tax_amount','total_amount',
+                    'payment_status','payment_reference','notes','paid_at','created_at','updated_at','session_expires_at'
+                ])
+                ->where('customer_id', $customer->id)
+                ->with([
+                    'items:id,order_id,menu_id,quantity,price,subtotal,status,special_notes',
+                    'items.menu:id,name,price',
+                    'table:id,table_number'
+                ])
+                ->orderBy('created_at', 'desc')
+                ->get();
+
+            $currentSessionOrders = $allOrders->where('session_expires_at', '>', now())->values();
+            $pastOrders           = $allOrders->where('session_expires_at', '<=', now())->values();
+
+            $totalSpent = Order::where('customer_id', $customer->id)
+                ->where('payment_status', 'Paid')
+                ->sum('total_amount');
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'customer'        => [
+                        'id'        => $customer->id,
+                        'email'     => $customer->email,
+                        'device_id' => $customer->device_id
+                    ],
+                    'current_session' => $currentSessionOrders,
+                    'past_orders'     => $pastOrders,
+                    'all_orders'      => $allOrders,
+                    'total_orders'    => $allOrders->count(),
+                    'total_spent'     => (float) $totalSpent
+                ]
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Failed to retrieve order history: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal mengambil riwayat order'
+            ], 500);
+        }
+    }
+
+    /**
+     * GET /api/v1/orders/history/device?device_id=UUID
      */
     public function deviceHistory(Request $request)
     {
         try {
-            $deviceId = $request->device_id;
-            
+            // Terima dari query ATAU header
+            $deviceId = $request->query('device_id') ?: $request->header('X-Device-Id');
             if (!$deviceId) {
                 return response()->json([
                     'success' => false,
@@ -314,14 +336,8 @@ class OrderController extends Controller
                 ], 400);
             }
 
-            \Log::info('Device history request', ['device_id' => $deviceId]);
-
-            // Get customers
-            $customers = Customer::where('device_id', $deviceId)->get();
-            
-            \Log::info('Customers found', ['count' => $customers->count()]);
-
-            if ($customers->isEmpty()) {
+            $customerIds = Customer::where('device_id', $deviceId)->pluck('id');
+            if ($customerIds->isEmpty()) {
                 return response()->json([
                     'success' => true,
                     'data' => [
@@ -332,129 +348,89 @@ class OrderController extends Controller
                 ]);
             }
 
-            $customerIds = $customers->pluck('id')->toArray();
-            
-            \Log::info('Customer IDs', ['ids' => $customerIds]);
-
-            // Get orders - NO circular relations
             $orders = Order::select([
-                    'id', 'order_uuid', 'order_number', 'customer_id', 'table_id',
-                    'subtotal', 'service_charge_amount', 'tax_amount', 'total_amount',
-                    'payment_status', 'payment_reference', 'notes', 'paid_at', 'created_at'
+                    'id','order_uuid','order_number','customer_id','table_id',
+                    'subtotal','service_charge_amount','tax_amount','total_amount',
+                    'payment_status','payment_reference','notes','paid_at','created_at','updated_at'
                 ])
                 ->whereIn('customer_id', $customerIds)
                 ->with([
-                    'items:id,order_id,menu_id,quantity,price,subtotal',
+                    'items:id,order_id,menu_id,quantity,price,subtotal,status,special_notes',
                     'items.menu:id,name,price',
-                    'table:id,table_number'
+                    'table:id,table_number',
+                    'customer:id,email'
                 ])
                 ->orderBy('created_at', 'desc')
-                ->limit(50) // Limit untuk testing
+                ->limit(100)
                 ->get();
 
-            \Log::info('Orders found', ['count' => $orders->count()]);
-
             $totalSpent = Order::whereIn('customer_id', $customerIds)
-                            ->where('payment_status', 'Paid')
-                            ->sum('total_amount');
+                ->where('payment_status', 'Paid')
+                ->sum('total_amount');
 
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'orders' => $orders,
+                    'orders'       => $orders,
                     'total_orders' => $orders->count(),
-                    'total_spent' => (float) $totalSpent
+                    'total_spent'  => (float) $totalSpent
                 ]
             ]);
-
         } catch (\Exception $e) {
-            \Log::error('Device history error: ' . $e->getMessage());
-            \Log::error($e->getTraceAsString());
-            
+            Log::error('Device history error: '.$e->getMessage(), ['trace' => $e->getTraceAsString()]);
             return response()->json([
                 'success' => false,
-                'message' => 'Error: ' . $e->getMessage()
+                'message' => 'Internal error'
             ], 500);
         }
     }
 
-    /**
-     * Get order history by session token (original method - UPDATED)
-     * 
-     * GET /api/v1/orders/history/{sessionToken}
-     */
-    public function history($sessionToken)
-    {
-        try {
-            $customer = Customer::where('session_token', $sessionToken)->first();
-
-            if (!$customer) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Session tidak valid'
-                ], 401);
-            }
-
-            // Get orders dari customer ini (include expired)
-            // Tapi prioritaskan session aktif di response
-            $allOrders = Order::with(['items.menu', 'table'])
-                            ->where('customer_id', $customer->id)
-                            ->orderBy('created_at', 'desc')
-                            ->get();
-
-            // Separate current session vs history
-            $currentSessionOrders = $allOrders->filter(function($order) {
-                return $order->session_expires_at > now();
-            })->values();
-
-            $pastOrders = $allOrders->filter(function($order) {
-                return $order->session_expires_at <= now();
-            })->values();
-
-            // Calculate totals
-            $totalSpent = Order::where('customer_id', $customer->id)
-                            ->where('payment_status', 'Paid')
-                            ->sum('total_amount');
-
-            return response()->json([
-                'success' => true,
-                'data' => [
-                    'customer' => [
-                        'id' => $customer->id,
-                        'email' => $customer->email,
-                        'device_id' => $customer->device_id
-                    ],
-                    'current_session' => $currentSessionOrders,
-                    'past_orders' => $pastOrders,
-                    'all_orders' => $allOrders,
-                    'total_orders' => $allOrders->count(),
-                    'total_spent' => (float) $totalSpent
-                ]
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Failed to retrieve order history: ' . $e->getMessage());
-            
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal mengambil riwayat order'
-            ], 500);
-        }
-    }
-
-    /**
-     * Generate unique order number
-     * 
-     * @return string
-     */
     private function generateOrderNumber()
     {
         $date = now()->format('Ymd');
         $lastOrder = Order::whereDate('created_at', today())
-                          ->orderBy('id', 'desc')
-                          ->first();
+            ->orderBy('id', 'desc')
+            ->first();
 
         $sequence = $lastOrder ? intval(substr($lastOrder->order_number, -3)) + 1 : 1;
-        
         return 'ORD-' . $date . '-' . str_pad($sequence, 3, '0', STR_PAD_LEFT);
+    }
+
+    public function markCashPaid(Request $request, string $uuid)
+    {
+        try {
+            $order = Order::where('order_uuid', $uuid)->first();
+            if (!$order) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Order tidak ditemukan'
+                ], 404);
+            }
+
+            if (strtolower($order->payment_status) === 'paid') {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Order sudah paid sebelumnya',
+                    'data'    => $order
+                ]);
+            }
+
+            $order->payment_status    = 'Paid';
+            $order->payment_reference = 'CASH';
+            $order->paid_at           = now();
+            $order->save();
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Status pembayaran tunai diperbarui ke Paid',
+                'data'    => $order
+            ]);
+        } catch (\Exception $e) {
+            Log::error('markCashPaid error: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Gagal memperbarui pembayaran tunai'
+            ], 500);
+        }
     }
 }
