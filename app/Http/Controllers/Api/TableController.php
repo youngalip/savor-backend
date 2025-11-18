@@ -43,7 +43,7 @@ class TableController extends Controller
                 ->select('id', 'table_number', 'qr_code', 'status', 'qr_generated_at', 'created_at', 'updated_at');
 
             // Filter by status
-            if ($request->has('status')) {
+            if ($request->filled('status')) {
                 $query->where('status', $request->status);
             }
 
