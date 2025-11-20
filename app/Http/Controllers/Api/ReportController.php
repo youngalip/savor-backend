@@ -638,4 +638,175 @@ class ReportController extends Controller
             ];
         })->toArray();
     }
+    
+    /**
+     * Get aggregated revenue by period (monthly/weekly)
+     * Supports 3-month, 6-month, 1-year views with comparison
+     */
+    public function revenueAggregated(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'year' => 'required|integer|min:2020',
+            'view_type' => 'required|in:3m,6m,1y',
+            'category_id' => 'nullable|exists:categories,id'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            $year = $request->year;
+            $viewType = $request->view_type;
+            $categoryId = $request->category_id;
+
+            // Calculate date ranges based on view type
+            $ranges = $this->calculateDateRanges($year, $viewType);
+            
+            // Get current period data
+            $currentData = $this->getAggregatedData(
+                $ranges['current_start'],
+                $ranges['current_end'],
+                $categoryId
+            );
+            
+            // Get previous period data for comparison
+            $previousData = $this->getAggregatedData(
+                $ranges['previous_start'],
+                $ranges['previous_end'],
+                $categoryId
+            );
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'period' => [
+                        'type' => $viewType,
+                        'year' => $year,
+                        'current' => [
+                            'start' => $ranges['current_start']->format('Y-m-d'),
+                            'end' => $ranges['current_end']->format('Y-m-d')
+                        ],
+                        'previous' => [
+                            'start' => $ranges['previous_start']->format('Y-m-d'),
+                            'end' => $ranges['previous_end']->format('Y-m-d')
+                        ]
+                    ],
+                    'current' => $currentData,
+                    'previous' => $previousData,
+                    'comparison' => $this->calculateComparison($currentData, $previousData)
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to generate aggregated report',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Calculate date ranges based on view type
+     */
+    private function calculateDateRanges($year, $viewType)
+    {
+        switch ($viewType) {
+            case '3m': // Last 3 months of the year
+                $currentStart = Carbon::create($year, 10, 1)->startOfMonth();
+                $currentEnd = Carbon::create($year, 12, 31)->endOfMonth();
+                $previousStart = $currentStart->copy()->subMonths(3);
+                $previousEnd = $currentEnd->copy()->subMonths(3);
+                break;
+                
+            case '6m': // Last 6 months of the year
+                $currentStart = Carbon::create($year, 7, 1)->startOfMonth();
+                $currentEnd = Carbon::create($year, 12, 31)->endOfMonth();
+                $previousStart = $currentStart->copy()->subMonths(6);
+                $previousEnd = $currentEnd->copy()->subMonths(6);
+                break;
+                
+            case '1y': // Full year
+                $currentStart = Carbon::create($year, 1, 1)->startOfYear();
+                $currentEnd = Carbon::create($year, 12, 31)->endOfYear();
+                $previousStart = Carbon::create($year - 1, 1, 1)->startOfYear();
+                $previousEnd = Carbon::create($year - 1, 12, 31)->endOfYear();
+                break;
+        }
+        
+        return [
+            'current_start' => $currentStart,
+            'current_end' => $currentEnd,
+            'previous_start' => $previousStart,
+            'previous_end' => $previousEnd
+        ];
+    }
+
+    /**
+     * Get aggregated data - FIXED FOR POSTGRESQL
+     */
+    private function getAggregatedData($startDate, $endDate, $categoryId = null)
+    {
+        $query = DB::table('orders as o');
+        
+        if ($categoryId) {
+            $query->join('order_items as oi', 'o.id', '=', 'oi.order_id')
+                ->join('menus as m', 'oi.menu_id', '=', 'm.id')
+                ->where('m.category_id', $categoryId);
+        }
+        
+        // FIXED: Use TO_CHAR for PostgreSQL instead of MONTHNAME
+        $data = $query->where('o.payment_status', 'Paid')
+            ->whereBetween('o.created_at', [$startDate, $endDate])
+            ->selectRaw("
+                EXTRACT(YEAR FROM o.created_at)::INTEGER as year,
+                EXTRACT(MONTH FROM o.created_at)::INTEGER as month,
+                TRIM(TO_CHAR(o.created_at, 'Month')) as month_name,
+                COALESCE(SUM(o.total_amount), 0) as revenue,
+                COUNT(DISTINCT o.id) as orders_count,
+                COUNT(DISTINCT o.customer_id) as customers_count,
+                COALESCE(AVG(o.total_amount), 0) as avg_order_value
+            ")
+            ->groupByRaw('EXTRACT(YEAR FROM o.created_at), EXTRACT(MONTH FROM o.created_at), TO_CHAR(o.created_at, \'Month\')')
+            ->orderByRaw('EXTRACT(YEAR FROM o.created_at) ASC, EXTRACT(MONTH FROM o.created_at) ASC')
+            ->get();
+        
+        return $data->map(function($item) {
+            return [
+                'year' => (int) $item->year,
+                'month' => (int) $item->month,
+                'month_name' => trim($item->month_name), // Trim extra spaces from TO_CHAR
+                'revenue' => (float) $item->revenue,
+                'orders_count' => (int) $item->orders_count,
+                'customers_count' => (int) $item->customers_count,
+                'avg_order_value' => (float) $item->avg_order_value
+            ];
+        })->toArray();
+    }
+
+    /**
+     * Calculate comparison between two periods
+     */
+    private function calculateComparison($currentData, $previousData)
+    {
+        $currentTotal = array_sum(array_column($currentData, 'revenue'));
+        $previousTotal = array_sum(array_column($previousData, 'revenue'));
+        
+        $growthRate = 0;
+        if ($previousTotal > 0) {
+            $growthRate = (($currentTotal - $previousTotal) / $previousTotal) * 100;
+        }
+        
+        return [
+            'current_total' => $currentTotal,
+            'previous_total' => $previousTotal,
+            'growth_rate' => round($growthRate, 2),
+            'difference' => $currentTotal - $previousTotal
+        ];
+    }
 }

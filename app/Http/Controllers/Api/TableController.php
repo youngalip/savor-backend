@@ -12,19 +12,12 @@ use Illuminate\Support\Facades\Validator;
  * TableController
  * 
  * Handles table management (CRUD + QR generation)
- * - Fields: table_number, status, QR code
- * - QR library: simplesoftwareio/simple-qrcode
+ * Status is INFORMATIONAL only - does not block customer scans
  */
 class TableController extends Controller
 {
-    /**
-     * QR Code service
-     */
     private QRCodeService $qrCodeService;
 
-    /**
-     * Constructor
-     */
     public function __construct(QRCodeService $qrCodeService)
     {
         $this->qrCodeService = $qrCodeService;
@@ -32,9 +25,6 @@ class TableController extends Controller
 
     /**
      * Get all tables with filters
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function index(Request $request)
     {
@@ -42,13 +32,13 @@ class TableController extends Controller
             $query = DB::table('tables')
                 ->select('id', 'table_number', 'qr_code', 'status', 'qr_generated_at', 'created_at', 'updated_at');
 
-            // Filter by status
+            // ✅ FIXED: Filter by status - use filled() instead of has()
             if ($request->filled('status')) {
                 $query->where('status', $request->status);
             }
 
             // Search by table number
-            if ($request->has('search')) {
+            if ($request->filled('search')) {
                 $search = $request->search;
                 $query->where('table_number', 'ILIKE', "%{$search}%");
             }
@@ -91,9 +81,6 @@ class TableController extends Controller
 
     /**
      * Get single table by ID
-     * 
-     * @param int $id
-     * @return \Illuminate\Http\JsonResponse
      */
     public function show($id)
     {
@@ -123,13 +110,9 @@ class TableController extends Controller
 
     /**
      * Create new table
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
      */
     public function store(Request $request)
     {
-        // Validation
         $validator = Validator::make($request->all(), [
             'table_number' => 'required|string|max:20|unique:tables,table_number'
         ]);
@@ -147,13 +130,13 @@ class TableController extends Controller
 
             $tableId = DB::table('tables')->insertGetId([
                 'table_number' => $request->table_number,
-                'qr_code' => '', // Will be updated after QR generation
-                'status' => 'Free',
+                'qr_code' => '',
+                'status' => 'Free', // Informational only
                 'created_at' => now(),
                 'updated_at' => now()
             ]);
 
-            // Generate QR code using service
+            // Generate QR code
             $qrData = $this->qrCodeService->generateTableQR($tableId, null, 'svg');
 
             // Update table with QR code path
@@ -164,7 +147,6 @@ class TableController extends Controller
 
             DB::commit();
 
-            // Fetch created table
             $table = DB::table('tables')->where('id', $tableId)->first();
 
             return response()->json([
@@ -189,14 +171,9 @@ class TableController extends Controller
 
     /**
      * Update existing table
-     * 
-     * @param Request $request
-     * @param int $id
-     * @return \Illuminate\Http\JsonResponse
      */
     public function update(Request $request, $id)
     {
-        // Check if table exists
         if (!DB::table('tables')->where('id', $id)->exists()) {
             return response()->json([
                 'success' => false,
@@ -204,7 +181,6 @@ class TableController extends Controller
             ], 404);
         }
 
-        // Validation
         $validator = Validator::make($request->all(), [
             'table_number' => 'string|max:20|unique:tables,table_number,' . $id,
             'status' => 'in:Free,Occupied'
@@ -223,14 +199,13 @@ class TableController extends Controller
 
             $updateData = ['updated_at' => now()];
 
-            if ($request->has('table_number')) $updateData['table_number'] = $request->table_number;
-            if ($request->has('status')) $updateData['status'] = $request->status;
+            if ($request->filled('table_number')) $updateData['table_number'] = $request->table_number;
+            if ($request->filled('status')) $updateData['status'] = $request->status;
 
             DB::table('tables')->where('id', $id)->update($updateData);
 
             DB::commit();
 
-            // Fetch updated table
             $table = DB::table('tables')->where('id', $id)->first();
 
             return response()->json([
@@ -251,9 +226,6 @@ class TableController extends Controller
 
     /**
      * Delete table
-     * 
-     * @param int $id
-     * @return \Illuminate\Http\JsonResponse
      */
     public function destroy($id)
     {
@@ -272,7 +244,6 @@ class TableController extends Controller
                 $this->qrCodeService->deleteQRCode($table->qr_code);
             }
 
-            // Delete table from database
             DB::table('tables')->where('id', $id)->delete();
 
             return response()->json([
@@ -290,10 +261,7 @@ class TableController extends Controller
     }
 
     /**
-     * Generate QR code for a specific table
-     * 
-     * @param int $id
-     * @return \Illuminate\Http\JsonResponse
+     * Generate QR code for specific table
      */
     public function generateQRCode($id)
     {
@@ -337,10 +305,7 @@ class TableController extends Controller
     }
 
     /**
-     * Bulk generate QR codes for multiple tables
-     * 
-     * @param Request $request
-     * @return \Illuminate\Http\JsonResponse
+     * Bulk generate QR codes
      */
     public function bulkGenerateQR(Request $request)
     {
@@ -415,4 +380,5 @@ class TableController extends Controller
             ], 500);
         }
     }
+
 }

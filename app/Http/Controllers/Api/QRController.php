@@ -43,6 +43,7 @@ class QRController extends Controller
                 ->first();
 
             if ($activeOrder) {
+                // Update customer activity
                 $customer->update([
                     'session_token' => Str::random(32),
                     'last_activity' => now(),
@@ -50,11 +51,16 @@ class QRController extends Controller
                     'ip_address'    => $request->ip(),
                 ]);
 
+                // Perpanjang session
                 $activeOrder->update([
                     'session_expires_at' => now()->addHours(2)
                 ]);
 
-                $table->update(['status' => 'Occupied']);
+                // Update last_used_at untuk tracking (optional - status tetap informational)
+                $table->update([
+                    'status' => 'Occupied', // Informational only
+                    'updated_at' => now()
+                ]);
 
                 return response()->json([
                     'success' => true,
@@ -78,33 +84,11 @@ class QRController extends Controller
             }
         }
 
-        // 5) Tolak jika ada customer LAIN yang masih aktif di meja ini
-        if ($table->status === 'Occupied') {
-            $activeByOthers = Order::where('table_id', $table->id)
-                ->where('session_expires_at', '>', now())
-                ->where('payment_status', 'Pending')
-                ->whereHas('customer', function ($q) use ($deviceId) {
-                    $q->where('device_id', '!=', $deviceId);
-                })
-                ->first();
+        // 5) ✅ REMOVED BLOCKING LOGIC - Always allow new scan
+        // Multiple customers can have active sessions on same table
+        // Tracking is by device_id, not table status
 
-            if ($activeByOthers) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Meja sedang digunakan customer lain',
-                    'data' => [
-                        'table_status' => 'Occupied',
-                        'estimated_free_at' => $activeByOthers->session_expires_at,
-                        'alternative_action' => 'Silakan tunggu atau pilih meja lain'
-                    ]
-                ], 409);
-            } else {
-                // Reset status bila occupied tapi tak ada session aktif
-                $table->update(['status' => 'Free']);
-            }
-        }
-
-        // 6) Buat / update customer (persist device_id di sini)
+        // 6) Buat / update customer (persist device_id)
         if (!$customer) {
             $customer = Customer::create([
                 'uuid'          => (string) Str::uuid(),
@@ -115,7 +99,7 @@ class QRController extends Controller
                 'last_activity' => now()
             ]);
         } else {
-            // Pastikan device_id tersimpan (andai sebelumnya null)
+            // Update existing customer
             if (!$customer->device_id) {
                 $customer->device_id = $deviceId;
             }
@@ -126,8 +110,11 @@ class QRController extends Controller
             $customer->save();
         }
 
-        // 7) Tandai meja terisi
-        $table->update(['status' => 'Occupied']);
+        // 7) Update table info (informational only, not for blocking)
+        $table->update([
+            'status' => 'Occupied', // Display purposes only
+            'updated_at' => now()
+        ]);
 
         return response()->json([
             'success' => true,

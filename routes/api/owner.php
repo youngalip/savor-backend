@@ -94,11 +94,12 @@ Route::prefix('owner')->name('owner.')->group(function () {
             ->name('overview');
         Route::get('/revenue', [ReportController::class, 'revenue'])
             ->name('revenue');
+        Route::get('/revenue/aggregated', [ReportController::class, 'revenueAggregated']);
         Route::get('/menu-performance', [ReportController::class, 'menuPerformance'])
             ->name('menu-performance');
         Route::get('/peak-hours', [ReportController::class, 'peakHours'])
             ->name('peak-hours');
-        
+
         // Export
         Route::get('/export', [ReportController::class, 'export'])
             ->name('export');
