@@ -19,10 +19,14 @@ use App\Http\Controllers\Api\ReportController;
 | - Table Management (CRUD + QR)
 | - Sales Reports & Analytics
 |
-| Middleware: jwt.auth, owner.access (need to be implemented)
+| 🔒 Protected: JWT Auth + Role (Owner only)
+| Note: Owner juga bisa akses semua routes staff (handled by RoleMiddleware)
 */
 
-Route::prefix('owner')->name('owner.')->group(function () {
+Route::prefix('owner')
+    ->middleware(['jwt.auth', 'role:owner'])
+    ->name('owner.')
+    ->group(function () {
     
     // ==========================================
     // DASHBOARD & ANALYTICS

@@ -67,5 +67,8 @@ class Kernel extends HttpKernel
         
         // JWT Authentication Middleware
         'jwt.auth' => \App\Http\Middleware\JwtAuthMiddleware::class,
+        
+        // TAMBAHAN BARU: Role-based Authorization Middleware
+        'role' => \App\Http\Middleware\RoleMiddleware::class,
     ];
 }

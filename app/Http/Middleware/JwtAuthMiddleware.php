@@ -9,24 +9,12 @@ use Tymon\JWTAuth\Exceptions\JWTException;
 use Tymon\JWTAuth\Exceptions\TokenExpiredException;
 use Tymon\JWTAuth\Exceptions\TokenInvalidException;
 
-/**
- * JwtAuthMiddleware
- * 
- * Middleware to verify JWT token and check user status
- */
 class JwtAuthMiddleware
 {
-    /**
-     * Handle an incoming request.
-     *
-     * @param  \Illuminate\Http\Request  $request
-     * @param  \Closure  $next
-     * @return mixed
-     */
     public function handle(Request $request, Closure $next)
     {
         try {
-            // Try to authenticate user via token (now returns User model)
+            // Authenticate user via token
             $user = JWTAuth::parseToken()->authenticate();
 
             if (!$user) {
@@ -44,8 +32,8 @@ class JwtAuthMiddleware
                 ], 403);
             }
 
-            // Attach user to request for use in controllers
-            $request->merge(['auth_user' => $user]);
+            // 🔥 FIX: Set user to auth guard instead of merge
+            auth()->setUser($user);
 
         } catch (TokenExpiredException $e) {
             return response()->json([

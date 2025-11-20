@@ -9,9 +9,13 @@ use App\Http\Controllers\Api\CashierController;
 |--------------------------------------------------------------------------
 | Routes untuk panel kasir
 | Prefix: /api/v1/cashier
+| 
+| 🔒 Protected: JWT Auth + Role (Kasir, Owner)
 */
 
-Route::prefix('cashier')->group(function () {
+Route::prefix('cashier')
+    ->middleware(['jwt.auth', 'role:kasir'])
+    ->group(function () {
     
     // Get orders with filters
     Route::get('/orders', [CashierController::class, 'getOrders']);

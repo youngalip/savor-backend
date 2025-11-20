@@ -7,13 +7,6 @@ use App\Http\Controllers\Api\AuthController;
 |--------------------------------------------------------------------------
 | Authentication Routes
 |--------------------------------------------------------------------------
-|
-| These routes handle user authentication:
-| - Login (public)
-| - Logout (protected)
-| - Refresh token (protected)
-| - Get current user (protected)
-|
 | Base URL: /api/v1/auth
 */
 

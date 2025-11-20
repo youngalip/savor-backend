@@ -126,16 +126,20 @@ class AuthService
     {
         $baseUrl = env('FRONTEND_URL', 'http://localhost:5173');
         
+        // Normalize role to lowercase untuk consistency
+        $normalizedRole = strtolower($role);
+        
         $redirectMap = [
-            'Kitchen' => $baseUrl . '/staff/kitchen-station',
-            'Bar' => $baseUrl . '/staff/bar-station',
-            'Pastry' => $baseUrl . '/staff/pastry-station',
-            'Kasir' => $baseUrl . '/staff/cashier',
-            'Owner' => $baseUrl . '/owner/dashboard',
+            'kitchen' => $baseUrl . '/staff/kitchen-station',
+            'bar' => $baseUrl . '/staff/bar-station',
+            'pastry' => $baseUrl . '/staff/pastry-station',
+            'kasir' => $baseUrl . '/staff/cashier',
+            'owner' => $baseUrl . '/owner/dashboard',
         ];
 
-        return $redirectMap[$role] ?? $baseUrl;
+        return $redirectMap[$normalizedRole] ?? $baseUrl;
     }
+
     /**
      * Clean up old login logs (optional - for maintenance)
      * 
