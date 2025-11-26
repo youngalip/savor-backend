@@ -14,16 +14,49 @@ use App\Http\Controllers\Api\PaymentController;
 */
 
 // ==========================================
-// QR SCANNING & SESSION MANAGEMENT
+// QR SCANNING & SESSION MANAGEMENT (Customer)
 // ==========================================
-Route::post('/scan-qr', [QRController::class, 'scanQR'])->name('scan-qr');
-Route::get('/session/{token}', [QRController::class, 'getSession'])->name('session.show');
 
+// ✅ Main QR Scan Endpoint (FIXED: akan support format QR_A1_123)
+Route::post('/scan-qr', [QRController::class, 'scanQR'])
+    ->name('scan-qr');
+
+// ✅ Session Management
 Route::prefix('session')->name('session.')->group(function () {
-    Route::get('/{token}', [QRController::class, 'getSession'])->name('get');
-    Route::post('/validate', [QRController::class, 'validateSession'])->name('validate');
-    Route::post('/extend/{token}', [QRController::class, 'extendSession'])->name('extend');
+    // Get session info by token
+    Route::get('/{token}', [QRController::class, 'getSession'])
+        ->name('get');
+    
+    // ✅ NEW: Validate if session still active (untuk auto-check di frontend)
+    Route::post('/validate', [QRController::class, 'validateSession'])
+        ->name('validate');
+    
+    // ✅ NEW: Extend session (untuk keep-alive mechanism)
+    Route::post('/{token}/extend', [QRController::class, 'extendSession'])
+        ->name('extend');
 });
+
+// ==========================================
+// ✅ NEW: PUBLIC QR IMAGE ACCESS
+// Untuk serve QR image dari storage
+// ==========================================
+Route::get('/qr-image/{filename}', function ($filename) {
+    // Sanitize filename
+    $filename = basename($filename);
+    $path = storage_path('app/public/uploads/qr-codes/' . $filename);
+    
+    if (!file_exists($path)) {
+        abort(404, 'QR code not found');
+    }
+    
+    $extension = pathinfo($path, PATHINFO_EXTENSION);
+    $mimeType = $extension === 'svg' ? 'image/svg+xml' : 'image/png';
+    
+    return response()->file($path, [
+        'Content-Type' => $mimeType,
+        'Cache-Control' => 'public, max-age=31536000', // Cache 1 year
+    ]);
+})->name('qr.image');
 
 // ==========================================
 // MENU & CATEGORY BROWSING

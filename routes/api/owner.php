@@ -75,17 +75,22 @@ Route::prefix('owner')
     // TABLE MANAGEMENT
     // ==========================================
     Route::prefix('tables')->name('tables.')->group(function () {
+        // CRUD Operations
         Route::get('/', [TableController::class, 'index'])->name('index');
         Route::get('/{id}', [TableController::class, 'show'])->name('show');
         Route::post('/', [TableController::class, 'store'])->name('store');
         Route::put('/{id}', [TableController::class, 'update'])->name('update');
         Route::delete('/{id}', [TableController::class, 'destroy'])->name('destroy');
         
-        // QR Code generation
+        // ✅ QR Code Generation (Keep existing)
         Route::post('/{id}/generate-qr', [TableController::class, 'generateQRCode'])
             ->name('generate-qr');
         Route::post('/generate-qr-bulk', [TableController::class, 'bulkGenerateQR'])
             ->name('generate-qr-bulk');
+        
+        // ✅ NEW: Get QR image URL (untuk frontend fetch QR dari storage)
+        Route::get('/{id}/qr-url', [TableController::class, 'getQRUrl'])
+            ->name('qr-url');
     });
     
     

@@ -32,7 +32,7 @@ class TableController extends Controller
             $query = DB::table('tables')
                 ->select('id', 'table_number', 'qr_code', 'status', 'qr_generated_at', 'created_at', 'updated_at');
 
-            // ✅ FIXED: Filter by status - use filled() instead of has()
+            // Filter by status
             if ($request->filled('status')) {
                 $query->where('status', $request->status);
             }
@@ -56,6 +56,14 @@ class TableController extends Controller
                 ->limit($limit)
                 ->offset($offset)
                 ->get();
+
+            // Add full QR URL to each table
+            $tables = $tables->map(function($table) {
+                if ($table->qr_code) {
+                    $table->qr_full_url = url($table->qr_code);
+                }
+                return $table;
+            });
 
             return response()->json([
                 'success' => true,
@@ -94,6 +102,11 @@ class TableController extends Controller
                 ], 404);
             }
 
+            // Add full QR URL
+            if ($table->qr_code) {
+                $table->qr_full_url = url($table->qr_code);
+            }
+
             return response()->json([
                 'success' => true,
                 'data' => $table
@@ -103,6 +116,97 @@ class TableController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to fetch table',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ✅ NEW: Get table QR code with full URL and scan URL
+     */
+    public function getTableQR($id)
+    {
+        try {
+            $table = DB::table('tables')->where('id', $id)->first();
+
+            if (!$table) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Table not found'
+                ], 404);
+            }
+
+            // Generate full URL for QR code image
+            $qrImageUrl = null;
+            if ($table->qr_code) {
+                $qrImageUrl = url($table->qr_code);
+            }
+
+            // Generate scan URL (what's encoded in the QR)
+            $scanUrl = null;
+            if ($table->qr_code) {
+                // Extract QR code from path
+                $qrCodeValue = basename($table->qr_code, '.svg');
+                $qrCodeValue = basename($qrCodeValue, '.png');
+                $scanUrl = config('app.frontend_url', url('/')) . '?qr=' . $qrCodeValue;
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'table' => $table,
+                    'qr_image_url' => $qrImageUrl,  // URL to download/view the QR image
+                    'scan_url' => $scanUrl,          // URL that QR code links to
+                    'qr_exists' => $this->qrCodeService->qrExists($table->qr_code ?? '')
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to fetch table QR',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * ✅ NEW: Get QR code as base64 (useful for direct display)
+     */
+    public function getQRBase64($id)
+    {
+        try {
+            $table = DB::table('tables')->where('id', $id)->first();
+
+            if (!$table || !$table->qr_code) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'QR code not found'
+                ], 404);
+            }
+
+            $base64 = $this->qrCodeService->getQRAsBase64($table->qr_code);
+
+            if (!$base64) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Failed to read QR code file'
+                ], 404);
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'table_id' => $table->id,
+                    'table_number' => $table->table_number,
+                    'qr_base64' => $base64
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to get QR as base64',
                 'error' => $e->getMessage()
             ], 500);
         }
@@ -131,7 +235,7 @@ class TableController extends Controller
             $tableId = DB::table('tables')->insertGetId([
                 'table_number' => $request->table_number,
                 'qr_code' => '',
-                'status' => 'Free', // Informational only
+                'status' => 'Free',
                 'created_at' => now(),
                 'updated_at' => now()
             ]);
@@ -155,7 +259,8 @@ class TableController extends Controller
                 'data' => [
                     'table' => $table,
                     'qr_url' => $qrData['qr_url'],
-                    'qr_svg' => $qrData['qr_svg'] ?? null
+                    'qr_svg' => $qrData['qr_svg'] ?? null,
+                    'qr_image_url' => url($qrData['qr_path'])
                 ]
             ], 201);
 
@@ -291,7 +396,8 @@ class TableController extends Controller
                 'data' => [
                     'table' => $table,
                     'qr_url' => $qrData['qr_url'],
-                    'qr_svg' => $qrData['qr_svg'] ?? null
+                    'qr_svg' => $qrData['qr_svg'] ?? null,
+                    'qr_image_url' => url($qrData['qr_path'])
                 ]
             ]);
 
@@ -350,7 +456,8 @@ class TableController extends Controller
                         'table_number' => $table->table_number,
                         'qr_code' => $qrData['qr_path'],
                         'qr_url' => $qrData['qr_url'],
-                        'qr_svg' => $qrData['qr_svg'] ?? null
+                        'qr_svg' => $qrData['qr_svg'] ?? null,
+                        'qr_image_url' => url($qrData['qr_path'])
                     ];
 
                 } catch (\Exception $e) {
@@ -380,5 +487,4 @@ class TableController extends Controller
             ], 500);
         }
     }
-
 }

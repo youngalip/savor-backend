@@ -7,36 +7,22 @@ use Illuminate\Support\Str;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
 /**
- * QRCodeService
+ * QRCodeService - FIXED VERSION
  * 
- * Handles QR code generation and management for table ordering system
- * Uses simplesoftwareio/simple-qrcode library
+ * Generates QR codes that encode: QR_{TABLE_NUMBER}_{TIMESTAMP}
+ * Example: QR_A1_1761053954
  */
 class QRCodeService
 {
-    /**
-     * QR Code size in pixels
-     */
     private const QR_SIZE = 300;
-
-    /**
-     * QR Code margin
-     */
     private const QR_MARGIN = 1;
-
-    /**
-     * Error correction level (L, M, Q, H)
-     * H = High (30% of data can be restored)
-     */
     private const ERROR_CORRECTION = 'H';
 
     /**
      * Generate QR code for table
      * 
-     * @param int $tableId
-     * @param string|null $oldQrPath Previous QR code path to delete
-     * @return array ['qr_path' => string, 'qr_url' => string, 'token' => string]
-     * @throws \Exception
+     * QR Code format: QR_{TABLE_NUMBER}_{TIMESTAMP}
+     * Example: QR_A1_1761053954
      */
     public function generateTableQR(int $tableId, ?string $oldQrPath = null, string $format = 'svg'): array
     {
@@ -45,30 +31,76 @@ class QRCodeService
             $this->deleteQRCode($oldQrPath);
         }
 
-        // Generate token
-        $token = $this->generateSecureToken();
+        // Get table info
+        $table = \DB::table('tables')->where('id', $tableId)->first();
+        if (!$table) {
+            throw new \Exception("Table not found");
+        }
 
-        // Generate order URL
-        $orderUrl = $this->generateOrderUrl($tableId, $token);
+        // Generate QR code value: QR_{TABLE_NUMBER}_{TIMESTAMP}
+        $timestamp = time();
+        $qrCodeValue = "QR_{$table->table_number}_{$timestamp}";
 
-        // Generate QR (format png/svg)
-        $qrData = $this->createQR($tableId, $orderUrl, $format);
+        // Generate QR image and save
+        $qrData = $this->createQR($tableId, $qrCodeValue, $format);
+
+        // Generate frontend URL (what user will access)
+        $frontendUrl = config('app.frontend_url', config('app.url')) . '?qr=' . $qrCodeValue;
 
         return [
-            'qr_path' => $qrData['path'],   // path file di storage
-            'qr_svg' => $qrData['svg'] ?? null, // hanya ada kalau format = svg
-            'qr_url'  => $orderUrl,
-            'token'   => $token
+            'qr_path' => $qrData['path'],           // File path in storage
+            'qr_svg' => $qrData['svg'] ?? null,     // SVG content (if format=svg)
+            'qr_url' => $frontendUrl,               // Frontend URL with QR parameter
+            'qr_value' => $qrCodeValue              // The actual QR code value
         ];
     }
 
     /**
-     * Bulk generate QR codes for multiple tables
-     * 
-     * @param array $tableIds
-     * @return array ['success' => [], 'failed' => []]
+     * Create QR code SVG/PNG and save to storage
      */
-    public function bulkGenerateQR(array $tableIds): array
+    private function createQR(int $tableId, string $qrCodeValue, string $format = 'svg'): array
+    {
+        // Generate QR code image
+        $qrCode = QrCode::format($format)
+            ->size(self::QR_SIZE)
+            ->margin(self::QR_MARGIN)
+            ->errorCorrection(self::ERROR_CORRECTION)
+            ->generate($qrCodeValue);
+
+        // Filename
+        $ext = $format === 'svg' ? 'svg' : 'png';
+        $filename = "table_{$tableId}_" . time() . ".{$ext}";
+
+        // Directory
+        $directory = 'uploads/qr-codes';
+        if (!Storage::disk('public')->exists($directory)) {
+            Storage::disk('public')->makeDirectory($directory);
+        }
+
+        $path = "{$directory}/{$filename}";
+
+        // Save to storage
+        Storage::disk('public')->put($path, $qrCode);
+
+        // Return path for database
+        $storagePath = '/storage/' . $path;
+
+        if ($format === 'svg') {
+            return [
+                'path' => $storagePath,
+                'svg' => $qrCode
+            ];
+        } else {
+            return [
+                'path' => $storagePath
+            ];
+        }
+    }
+
+    /**
+     * Bulk generate QR codes for multiple tables
+     */
+    public function bulkGenerateQR(array $tableIds, string $format = 'svg'): array
     {
         $result = [
             'success' => [],
@@ -88,78 +120,7 @@ class QRCodeService
     }
 
     /**
-     * Create QR code SVG/PNG and save to storage
-     */
-    private function createQR(int $tableId, string $url, string $format = 'svg'): array
-    {
-        $qrCode = QrCode::format($format)
-            ->size(self::QR_SIZE)
-            ->margin(self::QR_MARGIN)
-            ->errorCorrection(self::ERROR_CORRECTION)
-            ->generate($url);
-
-        // Filename
-        $ext = $format === 'svg' ? 'svg' : 'png';
-        $filename = "table_{$tableId}_" . time() . ".{$ext}";
-
-        // Directory
-        $directory = 'uploads/qr-codes';
-        if (!Storage::disk('public')->exists($directory)) {
-            Storage::disk('public')->makeDirectory($directory);
-        }
-
-        $path = "{$directory}/{$filename}";
-
-        if ($format === 'svg') {
-            Storage::disk('public')->put($path, $qrCode);
-            return ['path' => '/storage/' . $path, 'svg' => $qrCode];
-        } else {
-            Storage::disk('public')->put($path, $qrCode);
-            return ['path' => '/storage/' . $path];
-        }
-    }
-
-
-    /**
-     * Generate QR code filename
-     * 
-     * @param int $tableId
-     * @return string
-     */
-    private function generateQRFilename(int $tableId): string
-    {
-        return "table_{$tableId}_" . time() . ".png";
-    }
-
-    /**
-     * Generate secure random token
-     * 
-     * @param int $length
-     * @return string
-     */
-    private function generateSecureToken(int $length = 32): string
-    {
-        return Str::random($length);
-    }
-
-    /**
-     * Generate order URL for QR code
-     * 
-     * @param int $tableId
-     * @param string $token
-     * @return string
-     */
-    private function generateOrderUrl(int $tableId, string $token): string
-    {
-        $baseUrl = config('app.url');
-        return "{$baseUrl}/order?table={$tableId}&code={$token}";
-    }
-
-    /**
      * Delete QR code from storage
-     * 
-     * @param string $qrPath
-     * @return bool
      */
     public function deleteQRCode(string $qrPath): bool
     {
@@ -173,26 +134,7 @@ class QRCodeService
     }
 
     /**
-     * Verify QR code token
-     * 
-     * @param int $tableId
-     * @param string $token
-     * @return bool
-     */
-    public function verifyToken(int $tableId, string $token): bool
-    {
-        // TODO: Implement token verification logic
-        // This should check if token is valid for the table
-        // You might want to store tokens in database for verification
-        
-        return !empty($token) && strlen($token) === 32;
-    }
-
-    /**
-     * Get QR code as base64 string (useful for API responses)
-     * 
-     * @param string $qrPath
-     * @return string|null
+     * Get QR code as base64 string
      */
     public function getQRAsBase64(string $qrPath): ?string
     {
@@ -203,71 +145,26 @@ class QRCodeService
         }
 
         $imageData = Storage::disk('public')->get($storagePath);
-        return 'data:image/png;base64,' . base64_encode($imageData);
-    }
-
-    /**
-     * Generate QR code with custom styling
-     * 
-     * @param int $tableId
-     * @param string $url
-     * @param array $options Additional styling options
-     * @return string QR code path
-     * @throws \Exception
-     */
-    public function generateStyledQR(int $tableId, string $url, array $options = []): string
-    {
-        try {
-            $qrCode = QrCode::format('png')
-                ->size($options['size'] ?? self::QR_SIZE)
-                ->margin($options['margin'] ?? self::QR_MARGIN)
-                ->errorCorrection($options['error_correction'] ?? self::ERROR_CORRECTION);
-
-            // Add color if specified
-            if (isset($options['color'])) {
-                $qrCode->color(...$options['color']); // [R, G, B]
-            }
-
-            // Add background color if specified
-            if (isset($options['background_color'])) {
-                $qrCode->backgroundColor(...$options['background_color']); // [R, G, B]
-            }
-
-            // Generate QR code
-            $qrCodeImage = $qrCode->generate($url);
-
-            // Generate filename
-            $filename = $this->generateQRFilename($tableId);
-
-            // Save to storage
-            $directory = 'uploads/qr-codes';
-            $path = "{$directory}/{$filename}";
-            Storage::disk('public')->put($path, $qrCodeImage);
-
-            return '/storage/' . $path;
-
-        } catch (\Exception $e) {
-            throw new \Exception("Failed to generate styled QR code: " . $e->getMessage());
-        }
+        $extension = pathinfo($storagePath, PATHINFO_EXTENSION);
+        
+        $mimeType = $extension === 'svg' ? 'image/svg+xml' : 'image/png';
+        
+        return "data:{$mimeType};base64," . base64_encode($imageData);
     }
 
     /**
      * Check if QR code file exists
-     * 
-     * @param string $qrPath
-     * @return bool
      */
     public function qrExists(string $qrPath): bool
     {
+        if (empty($qrPath)) return false;
+        
         $storagePath = str_replace('/storage/', '', $qrPath);
         return Storage::disk('public')->exists($storagePath);
     }
 
     /**
      * Get QR code file size
-     * 
-     * @param string $qrPath
-     * @return int|null File size in bytes
      */
     public function getQRSize(string $qrPath): ?int
     {
@@ -283,17 +180,21 @@ class QRCodeService
     /**
      * Generate printable QR code (higher resolution)
      */
-    public function generatePrintableQR(int $tableId, string $url, string $format = 'svg'): string
+    public function generatePrintableQR(int $tableId, string $format = 'svg'): string
     {
-        return $this->createQR($tableId, $url, $format)['path'];
-    }
+        $table = \DB::table('tables')->where('id', $tableId)->first();
+        if (!$table) {
+            throw new \Exception("Table not found");
+        }
 
+        $timestamp = time();
+        $qrCodeValue = "QR_{$table->table_number}_{$timestamp}";
+
+        return $this->createQR($tableId, $qrCodeValue, $format)['path'];
+    }
 
     /**
      * Batch delete QR codes
-     * 
-     * @param array $qrPaths
-     * @return array ['deleted' => int, 'failed' => int]
      */
     public function batchDeleteQR(array $qrPaths): array
     {
@@ -311,6 +212,27 @@ class QRCodeService
         return [
             'deleted' => $deleted,
             'failed' => $failed
+        ];
+    }
+
+    /**
+     * Parse QR code value to extract table info
+     * 
+     * @param string $qrValue Format: QR_{TABLE_NUMBER}_{TIMESTAMP}
+     * @return array ['table_number' => string, 'timestamp' => int]
+     */
+    public function parseQRValue(string $qrValue): array
+    {
+        // Expected format: QR_A1_1761053954
+        $parts = explode('_', $qrValue);
+        
+        if (count($parts) < 3 || $parts[0] !== 'QR') {
+            throw new \Exception("Invalid QR code format");
+        }
+
+        return [
+            'table_number' => $parts[1],
+            'timestamp' => (int) $parts[2]
         ];
     }
 }

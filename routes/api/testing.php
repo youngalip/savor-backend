@@ -14,9 +14,31 @@ Route::prefix('test')->name('test.')->group(function () {
     
     // View data
     Route::get('/tables', function() {
+        $tables = \App\Models\Table::all();
+        
+        // ✅ TAMBAHAN: Generate qr_value dari qr_code path
+        $tables = $tables->map(function($table) {
+            if ($table->qr_code) {
+                // Extract timestamp dari filename
+                // Contoh: /storage/uploads/qr-codes/table_1_1762786766.svg
+                $filename = basename($table->qr_code, '.svg');
+                $filename = basename($filename, '.png');
+                
+                // Parse: table_1_1762786766 -> get 1762786766
+                preg_match('/table_\d+_(\d+)/', $filename, $matches);
+                $timestamp = $matches[1] ?? time();
+                
+                // Generate QR value: QR_A1_1762786766
+                $table->qr_value = "QR_{$table->table_number}_{$timestamp}";
+            } else {
+                $table->qr_value = null;
+            }
+            return $table;
+        });
+        
         return response()->json([
             'success' => true,
-            'data' => \App\Models\Table::all()
+            'data' => $tables
         ]);
     })->name('tables');
     
