@@ -59,8 +59,7 @@ class OrderController extends Controller
             $customer->last_activity = now();
             $customer->save();
 
-            // 2) Tentukan meja (tanpa asumsi customers.table_id)
-            //    - jika ada meja 'Occupied' pakai itu, kalau tidak ada, error
+            // 2) Tentukan meja
             $table = Table::where('status', 'Occupied')->first();
             if (!$table) {
                 DB::rollBack();
@@ -70,13 +69,34 @@ class OrderController extends Controller
                 ], 404);
             }
 
-            // 3) Validasi stok + subtotal
+            // ✅ 3) BATCH FETCH MENUS - Optimized!
+            $menuIds = collect($request->items)->pluck('menu_id')->unique()->toArray();
+            $menus = Menu::whereIn('id', $menuIds)
+                ->lockForUpdate() // Prevent race condition
+                ->get()
+                ->keyBy('id');
+
+            // Validasi semua menu ditemukan
+            foreach ($request->items as $item) {
+                if (!isset($menus[$item['menu_id']])) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Menu tidak ditemukan: ID ' . $item['menu_id']
+                    ], 404);
+                }
+            }
+
+            // ✅ 4) VALIDASI STOK & KALKULASI - Single loop
             $stockErrors = [];
-            $orderItems = [];
+            $orderItemsData = [];
             $itemsSubtotal = 0;
+            $stockUpdates = []; // Track stock updates
 
             foreach ($request->items as $item) {
-                $menu = Menu::find($item['menu_id']);
+                $menu = $menus[$item['menu_id']];
+                
+                // Cek stok
                 if ($menu->stock_quantity < $item['quantity']) {
                     $stockErrors[] = [
                         'menu_name' => $menu->name,
@@ -89,14 +109,22 @@ class OrderController extends Controller
                 $subtotal = $menu->price * $item['quantity'];
                 $itemsSubtotal += $subtotal;
 
-                $orderItems[] = [
-                    'menu'          => $menu,
+                // Prepare data untuk bulk insert
+                $orderItemsData[] = [
+                    'menu_id'       => $menu->id,
+                    'menu_name'     => $menu->name, // Store untuk reference
                     'quantity'      => $item['quantity'],
                     'price'         => $menu->price,
                     'subtotal'      => $subtotal,
                     'special_notes' => $item['special_notes'] ?? null,
                     'status'        => 'Pending'
                 ];
+
+                // Track stock updates
+                if (!isset($stockUpdates[$menu->id])) {
+                    $stockUpdates[$menu->id] = 0;
+                }
+                $stockUpdates[$menu->id] += $item['quantity'];
             }
 
             if (!empty($stockErrors)) {
@@ -108,10 +136,10 @@ class OrderController extends Controller
                 ], 400);
             }
 
-            // 4) Nomor order
+            // 5) Nomor order
             $orderNumber = $this->generateOrderNumber();
 
-            // 5) Buat order
+            // 6) Buat order
             $order = new Order([
                 'order_uuid'         => (string) Str::uuid(),
                 'order_number'       => $orderNumber,
@@ -122,27 +150,40 @@ class OrderController extends Controller
                 'session_expires_at' => now()->addHours(2),
             ]);
 
-            // 6) Hitung pricing
+            // 7) Hitung pricing
             $order->calculatePricing($itemsSubtotal);
             $order->save();
 
-            // 7) Simpan item & kurangi stok
-            foreach ($orderItems as $itemData) {
-                $order->items()->create([
-                    'menu_id'       => $itemData['menu']->id,
+            // ✅ 8) BULK INSERT ORDER ITEMS - Optimized!
+            $bulkInsertData = [];
+            $now = now();
+            
+            foreach ($orderItemsData as $itemData) {
+                $bulkInsertData[] = [
+                    'order_id'      => $order->id,
+                    'menu_id'       => $itemData['menu_id'],
                     'quantity'      => $itemData['quantity'],
                     'price'         => $itemData['price'],
                     'subtotal'      => $itemData['subtotal'],
                     'special_notes' => $itemData['special_notes'],
-                    'status'        => $itemData['status']
-                ]);
+                    'status'        => $itemData['status'],
+                    'created_at'    => $now,
+                    'updated_at'    => $now
+                ];
+            }
 
-                $itemData['menu']->decrement('stock_quantity', $itemData['quantity']);
+            DB::table('order_items')->insert($bulkInsertData);
+
+            // ✅ 9) BATCH UPDATE STOCK - Optimized!
+            foreach ($stockUpdates as $menuId => $quantity) {
+                DB::table('menus')
+                    ->where('id', $menuId)
+                    ->decrement('stock_quantity', $quantity);
             }
 
             DB::commit();
 
-            // 8) Email konfirmasi (opsional)
+            // 10) Email konfirmasi (non-blocking, di luar transaction)
             $emailSent = false;
             try {
                 if ($request->payment_method === 'non_cash' && $customer->email) {
@@ -160,7 +201,7 @@ class OrderController extends Controller
                     'order_uuid'         => $order->order_uuid,
                     'order_number'       => $order->order_number,
                     'breakdown'          => $order->breakdown,
-                    'items_count'        => $order->items()->count(),
+                    'items_count'        => count($orderItemsData),
                     'table_number'       => $table->table_number,
                     'email_sent'         => $emailSent,
                     'payment_status'     => $order->payment_status,
@@ -173,6 +214,7 @@ class OrderController extends Controller
             Log::error('Order creation failed: ' . $e->getMessage(), [
                 'session_token' => $request->session_token,
                 'items'         => $request->items,
+                'trace'         => $e->getTraceAsString()
             ]);
 
             return response()->json([
@@ -226,11 +268,15 @@ class OrderController extends Controller
         ]);
 
         try {
+            // ✅ Batch fetch menus
+            $menuIds = collect($request->items)->pluck('menu_id')->unique()->toArray();
+            $menus = Menu::whereIn('id', $menuIds)->get()->keyBy('id');
+
             $itemsSubtotal = 0;
             $itemsDetail = [];
 
             foreach ($request->items as $item) {
-                $menu = Menu::find($item['menu_id']);
+                $menu = $menus[$item['menu_id']];
                 $subtotal = $menu->price * $item['quantity'];
                 $itemsSubtotal += $subtotal;
 
@@ -327,7 +373,6 @@ class OrderController extends Controller
     public function deviceHistory(Request $request)
     {
         try {
-            // Terima dari query ATAU header
             $deviceId = $request->query('device_id') ?: $request->header('X-Device-Id');
             if (!$deviceId) {
                 return response()->json([
