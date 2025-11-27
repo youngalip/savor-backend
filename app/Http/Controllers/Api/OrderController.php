@@ -59,13 +59,20 @@ class OrderController extends Controller
             $customer->last_activity = now();
             $customer->save();
 
-            // 2) Tentukan meja
-            $table = Table::where('status', 'Occupied')->first();
+            Log::info('DEBUG ORDER STORE', [
+                'customer_id' => $customer->id,
+                'session_token' => $request->session_token,
+                'customer_table_id' => $customer->table_id,
+            ]);
+            
+            // 2) Tentukan meja dari session customer
+            $table = Table::find($customer->table_id);
+
             if (!$table) {
                 DB::rollBack();
                 return response()->json([
                     'success' => false,
-                    'message' => 'Meja tidak ditemukan'
+                    'message' => 'Meja dari session tidak ditemukan'
                 ], 404);
             }
 

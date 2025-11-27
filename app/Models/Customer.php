@@ -16,7 +16,8 @@ class Customer extends Model
         'email',
         'user_agent',
         'ip_address',
-        'last_activity'
+        'last_activity',
+        'table_id',
     ];
 
     protected $casts = [

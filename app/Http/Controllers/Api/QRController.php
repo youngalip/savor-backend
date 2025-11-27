@@ -82,6 +82,9 @@ class QRController extends Controller
                     'updated_at' => now()
                 ]);
 
+                $customer->table_id = $table->id;
+                $customer->save();
+
                 return response()->json([
                     'success' => true,
                     'message' => 'Welcome back! Session diperpanjang',
@@ -110,6 +113,7 @@ class QRController extends Controller
                 'uuid'          => (string) Str::uuid(),
                 'device_id'     => $deviceId,
                 'session_token' => Str::random(32),
+                'table_id'      => $table->id,   // <---------------- WAJIB
                 'user_agent'    => $request->userAgent(),
                 'ip_address'    => $request->ip(),
                 'last_activity' => now()
@@ -118,6 +122,7 @@ class QRController extends Controller
             if (!$customer->device_id) {
                 $customer->device_id = $deviceId;
             }
+            $customer->table_id = $table->id;
             $customer->session_token = Str::random(32);
             $customer->user_agent = $request->userAgent();
             $customer->ip_address = $request->ip();

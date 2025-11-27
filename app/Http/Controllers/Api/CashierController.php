@@ -27,7 +27,10 @@ class CashierController extends Controller
     {
         try {
             // Start with items relationship only
-            $query = Order::with(['items.menu.category'])
+            $query = Order::with([
+                'items.menu.category',
+                'table:id,table_number'
+            ])
                 ->where('payment_status', '!=', 'Failed');
 
             // Filter by payment status
@@ -383,7 +386,7 @@ class CashierController extends Controller
             'id' => $order->id,
             'order_number' => $order->order_number,
             'table_id' => $order->table_id,
-            'table_number' => $order->table_id, // table_id IS the table number!
+            'table_number' => $order->table->table_number ?? $order->table_id, // table_id IS the table number!
             'customer_name' => 'Customer', // Simplified - could add logic later
             'customer_email' => null,
             'order_time' => $order->created_at,
