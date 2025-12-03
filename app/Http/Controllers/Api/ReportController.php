@@ -638,16 +638,26 @@ class ReportController extends Controller
             ];
         })->toArray();
     }
+
+    /**
+     * Get period label for display
+     */
+    private function getPeriodLabel($startDate, $endDate, $viewType)
+    {
+        if ($viewType === '5y') {
+            return $startDate->format('Y') . ' - ' . $endDate->format('Y');
+        }
+        return $startDate->format('M Y') . ' - ' . $endDate->format('M Y');
+    }
     
     /**
-     * Get aggregated revenue by period (monthly/weekly)
-     * Supports 3-month, 6-month, 1-year views with comparison
+     * Get aggregated revenue by period
+     * FIXED: No more $year parameter, use NOW() as base
      */
     public function revenueAggregated(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'year' => 'required|integer|min:2020',
-            'view_type' => 'required|in:3m,6m,1y',
+            'view_type' => 'required|in:3m,6m,1y,5y',
             'category_id' => 'nullable|exists:categories,id'
         ]);
 
@@ -660,44 +670,45 @@ class ReportController extends Controller
         }
 
         try {
-            $year = $request->year;
             $viewType = $request->view_type;
             $categoryId = $request->category_id;
 
-            // Calculate date ranges based on view type
-            $ranges = $this->calculateDateRanges($year, $viewType);
+            // 🔥 Always use NOW as base (timezone already set in config)
+            $now = now();
+            $ranges = $this->calculateDateRanges($now, $viewType);
             
             // Get current period data
             $currentData = $this->getAggregatedData(
                 $ranges['current_start'],
                 $ranges['current_end'],
-                $categoryId
+                $categoryId,
+                $viewType
             );
             
             // Get previous period data for comparison
             $previousData = $this->getAggregatedData(
                 $ranges['previous_start'],
                 $ranges['previous_end'],
-                $categoryId
+                $categoryId,
+                $viewType
             );
 
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'period' => [
-                        'type' => $viewType,
-                        'year' => $year,
-                        'current' => [
-                            'start' => $ranges['current_start']->format('Y-m-d'),
-                            'end' => $ranges['current_end']->format('Y-m-d')
-                        ],
-                        'previous' => [
-                            'start' => $ranges['previous_start']->format('Y-m-d'),
-                            'end' => $ranges['previous_end']->format('Y-m-d')
-                        ]
+                    'view_type' => $viewType,
+                    'current_period' => [
+                        'start' => $ranges['current_start']->format('Y-m-d'),
+                        'end' => $ranges['current_end']->format('Y-m-d'),
+                        'label' => $this->getPeriodLabel($ranges['current_start'], $ranges['current_end'], $viewType)
                     ],
-                    'current' => $currentData,
-                    'previous' => $previousData,
+                    'previous_period' => [
+                        'start' => $ranges['previous_start']->format('Y-m-d'),
+                        'end' => $ranges['previous_end']->format('Y-m-d'),
+                        'label' => $this->getPeriodLabel($ranges['previous_start'], $ranges['previous_end'], $viewType)
+                    ],
+                    'current_data' => $currentData,
+                    'previous_data' => $previousData,
                     'comparison' => $this->calculateComparison($currentData, $previousData)
                 ]
             ]);
@@ -712,30 +723,37 @@ class ReportController extends Controller
     }
 
     /**
-     * Calculate date ranges based on view type
+     * 🔥 FIXED: Calculate from NOW, not from year parameter
      */
-    private function calculateDateRanges($year, $viewType)
+    private function calculateDateRanges($now, $viewType)
     {
         switch ($viewType) {
-            case '3m': // Last 3 months of the year
-                $currentStart = Carbon::create($year, 10, 1)->startOfMonth();
-                $currentEnd = Carbon::create($year, 12, 31)->endOfMonth();
-                $previousStart = $currentStart->copy()->subMonths(3);
-                $previousEnd = $currentEnd->copy()->subMonths(3);
+            case '3m': // Last 3 months from now
+                $currentEnd = $now->copy()->endOfMonth();
+                $currentStart = $now->copy()->subMonths(2)->startOfMonth();
+                $previousEnd = $currentStart->copy()->subDay()->endOfMonth();
+                $previousStart = $previousEnd->copy()->subMonths(2)->startOfMonth();
                 break;
                 
-            case '6m': // Last 6 months of the year
-                $currentStart = Carbon::create($year, 7, 1)->startOfMonth();
-                $currentEnd = Carbon::create($year, 12, 31)->endOfMonth();
-                $previousStart = $currentStart->copy()->subMonths(6);
-                $previousEnd = $currentEnd->copy()->subMonths(6);
+            case '6m': // Last 6 months from now
+                $currentEnd = $now->copy()->endOfMonth();
+                $currentStart = $now->copy()->subMonths(5)->startOfMonth();
+                $previousEnd = $currentStart->copy()->subDay()->endOfMonth();
+                $previousStart = $previousEnd->copy()->subMonths(5)->startOfMonth();
                 break;
                 
-            case '1y': // Full year
-                $currentStart = Carbon::create($year, 1, 1)->startOfYear();
-                $currentEnd = Carbon::create($year, 12, 31)->endOfYear();
-                $previousStart = Carbon::create($year - 1, 1, 1)->startOfYear();
-                $previousEnd = Carbon::create($year - 1, 12, 31)->endOfYear();
+            case '1y': // Last 12 months from now
+                $currentEnd = $now->copy()->endOfMonth();
+                $currentStart = $now->copy()->subMonths(11)->startOfMonth();
+                $previousEnd = $currentStart->copy()->subDay()->endOfMonth();
+                $previousStart = $previousEnd->copy()->subMonths(11)->startOfMonth();
+                break;
+
+            case '5y': // Last 5 full years
+                $currentEnd = $now->copy()->endOfYear();
+                $currentStart = $now->copy()->subYears(4)->startOfYear();
+                $previousEnd = $currentStart->copy()->subDay()->endOfYear();
+                $previousStart = $previousEnd->copy()->subYears(4)->startOfYear();
                 break;
         }
         
@@ -748,9 +766,9 @@ class ReportController extends Controller
     }
 
     /**
-     * Get aggregated data - FIXED FOR POSTGRESQL
+     * 🔥 Get aggregated data with proper grouping
      */
-    private function getAggregatedData($startDate, $endDate, $categoryId = null)
+    private function getAggregatedData($startDate, $endDate, $categoryId = null, $viewType = '1y')
     {
         $query = DB::table('orders as o');
         
@@ -760,27 +778,54 @@ class ReportController extends Controller
                 ->where('m.category_id', $categoryId);
         }
         
-        // FIXED: Use TO_CHAR for PostgreSQL instead of MONTHNAME
+        // For 5y view - group by YEAR
+        if ($viewType === '5y') {
+            $data = $query->where('o.payment_status', 'Paid')
+                ->whereBetween('o.created_at', [$startDate, $endDate])
+                ->selectRaw("
+                    EXTRACT(YEAR FROM o.created_at)::INTEGER as year,
+                    COALESCE(SUM(o.total_amount), 0) as revenue,
+                    COUNT(DISTINCT o.id) as orders_count,
+                    COUNT(DISTINCT o.customer_id) as customers_count,
+                    COALESCE(AVG(o.total_amount), 0) as avg_order_value
+                ")
+                ->groupByRaw('EXTRACT(YEAR FROM o.created_at)')
+                ->orderByRaw('EXTRACT(YEAR FROM o.created_at) ASC')
+                ->get();
+            
+            return $data->map(function($item) {
+                return [
+                    'period' => (string) $item->year,
+                    'year' => (int) $item->year,
+                    'revenue' => (float) $item->revenue,
+                    'orders_count' => (int) $item->orders_count,
+                    'customers_count' => (int) $item->customers_count,
+                    'avg_order_value' => (float) $item->avg_order_value
+                ];
+            })->toArray();
+        }
+        
+        // For 3m, 6m, 1y - group by MONTH
         $data = $query->where('o.payment_status', 'Paid')
             ->whereBetween('o.created_at', [$startDate, $endDate])
             ->selectRaw("
                 EXTRACT(YEAR FROM o.created_at)::INTEGER as year,
                 EXTRACT(MONTH FROM o.created_at)::INTEGER as month,
-                TRIM(TO_CHAR(o.created_at, 'Month')) as month_name,
+                TRIM(TO_CHAR(o.created_at, 'Mon')) as month_short,
                 COALESCE(SUM(o.total_amount), 0) as revenue,
                 COUNT(DISTINCT o.id) as orders_count,
                 COUNT(DISTINCT o.customer_id) as customers_count,
                 COALESCE(AVG(o.total_amount), 0) as avg_order_value
             ")
-            ->groupByRaw('EXTRACT(YEAR FROM o.created_at), EXTRACT(MONTH FROM o.created_at), TO_CHAR(o.created_at, \'Month\')')
+            ->groupByRaw('EXTRACT(YEAR FROM o.created_at), EXTRACT(MONTH FROM o.created_at), TO_CHAR(o.created_at, \'Mon\')')
             ->orderByRaw('EXTRACT(YEAR FROM o.created_at) ASC, EXTRACT(MONTH FROM o.created_at) ASC')
             ->get();
         
         return $data->map(function($item) {
             return [
+                'period' => trim($item->month_short) . ' ' . $item->year,
                 'year' => (int) $item->year,
                 'month' => (int) $item->month,
-                'month_name' => trim($item->month_name), // Trim extra spaces from TO_CHAR
                 'revenue' => (float) $item->revenue,
                 'orders_count' => (int) $item->orders_count,
                 'customers_count' => (int) $item->customers_count,
