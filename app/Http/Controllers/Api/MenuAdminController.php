@@ -97,6 +97,13 @@ class MenuAdminController extends Controller
                 ->limit($limit)
                 ->offset($offset)
                 ->get();
+            
+            $menus = $menus->map(function ($menu) {
+                if ($menu->image_url) {
+                    $menu->image_url = url($menu->image_url);
+                }
+                return $menu;
+            });
 
             return response()->json([
                 'success' => true,
@@ -149,6 +156,10 @@ class MenuAdminController extends Controller
                 ], 404);
             }
 
+            if ($menu->image_url) {
+                $menu->image_url = url($menu->image_url);
+            }
+            
             return response()->json([
                 'success' => true,
                 'data' => $menu
@@ -228,6 +239,10 @@ class MenuAdminController extends Controller
                 )
                 ->where('m.id', $menuId)
                 ->first();
+
+            if ($menu->image_url) {
+                $menu->image_url = url($menu->image_url);
+            }
 
             return response()->json([
                 'success' => true,
@@ -320,6 +335,10 @@ class MenuAdminController extends Controller
                 )
                 ->where('m.id', $id)
                 ->first();
+
+            if ($menu->image_url) {
+                $menu->image_url = url($menu->image_url);
+            }
 
             return response()->json([
                 'success' => true,
@@ -426,7 +445,7 @@ class MenuAdminController extends Controller
                 'success' => true,
                 'message' => 'Image uploaded successfully',
                 'data' => [
-                    'image_url' => $imageUrl
+                    'image_url' => url($imageUrl)
                 ]
             ]);
 
