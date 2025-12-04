@@ -50,6 +50,11 @@ class MenuController extends Controller
                         ->orderBy('name')
                         ->get()
                         ->map(function($menu) {
+                            // 🔥 Transform image URL to full URL
+                            if ($menu->image_url) {
+                                $menu->image_url = url($menu->image_url);
+                            }
+                            
                             // Add stock status info
                             $menu->stock_status = $menu->stock_quantity <= $menu->minimum_stock ? 'low' : 'normal';
                             $menu->is_low_stock = $menu->stock_quantity <= $menu->minimum_stock;
@@ -64,9 +69,9 @@ class MenuController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Gagal mengambil data menu'
-        ], 500);
+            ], 500);
+        }
     }
-}
 
     public function show($id)
     {
@@ -79,6 +84,15 @@ class MenuController extends Controller
                     'message' => 'Menu tidak ditemukan'
                 ], 404);
             }
+
+            // 🔥 Transform image URL to full URL
+            if ($menu->image_url) {
+                $menu->image_url = url($menu->image_url);
+            }
+
+            // 🔥 Add stock status info
+            $menu->stock_status = $menu->stock_quantity <= $menu->minimum_stock ? 'low' : 'normal';
+            $menu->is_low_stock = $menu->stock_quantity <= $menu->minimum_stock;
 
             return response()->json([
                 'success' => true,
