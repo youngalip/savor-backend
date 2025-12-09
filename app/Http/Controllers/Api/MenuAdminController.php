@@ -90,7 +90,9 @@ class MenuAdminController extends Controller
 
             // Get total count
             $total = $query->count();
-
+            
+            $totalAvailable = (clone $query)->where('m.is_available', true)->count();
+            $totalUnavailable = (clone $query)->where('m.is_available', false)->count();
             // Get paginated data
             $menus = $query->orderBy('m.display_order', 'ASC')
                 ->orderBy('m.created_at', 'DESC')
@@ -111,6 +113,8 @@ class MenuAdminController extends Controller
                     'menus' => $menus,
                     'pagination' => [
                         'total' => $total,
+                        'total_available' => $totalAvailable,
+                        'total_unavailable' => $totalUnavailable,
                         'page' => (int) $page,
                         'limit' => (int) $limit,
                         'total_pages' => ceil($total / $limit)
