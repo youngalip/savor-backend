@@ -116,7 +116,6 @@ class DashboardController extends Controller
         return [
             'revenue' => (float) $currentData->revenue,
             'orders_count' => (int) $currentData->orders_count,
-            'growth_rate' => round($growthRate, 2)
         ];
     }
 
