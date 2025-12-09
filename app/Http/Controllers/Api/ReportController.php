@@ -84,7 +84,6 @@ class ReportController extends Controller
      */
     public function revenue(Request $request)
     {
-        // Validation
         $validator = Validator::make($request->all(), [
             'start_date' => 'required|date',
             'end_date' => 'required|date|after_or_equal:start_date',
@@ -102,35 +101,60 @@ class ReportController extends Controller
         try {
             $startDate = Carbon::parse($request->start_date)->startOfDay();
             $endDate = Carbon::parse($request->end_date)->endOfDay();
+            $categoryId = $request->category_id;
 
-            // Build query
-            $query = DB::table('orders as o');
-
-            if ($request->has('category_id')) {
-                $query->join('order_items as oi', 'o.id', '=', 'oi.order_id')
-                      ->join('menus as m', 'oi.menu_id', '=', 'm.id')
-                      ->where('m.category_id', $request->category_id);
+            // ✅ FIXED: Proper category filtering
+            if ($categoryId) {
+                // Hitung dari order_items yang match category
+                $revenueData = DB::table('orders as o')
+                    ->join(DB::raw("(
+                        SELECT 
+                            oi.order_id,
+                            DATE(o2.created_at) as date,
+                            SUM(oi.subtotal) as category_revenue
+                        FROM order_items oi
+                        JOIN menus m ON oi.menu_id = m.id
+                        JOIN orders o2 ON oi.order_id = o2.id
+                        WHERE m.category_id = {$categoryId}
+                            AND o2.payment_status = 'Paid'
+                        GROUP BY oi.order_id, DATE(o2.created_at)
+                    ) as cat_items"), function($join) {
+                        $join->on('o.id', '=', 'cat_items.order_id');
+                    })
+                    ->where('o.payment_status', 'Paid')
+                    ->whereBetween('o.created_at', [$startDate, $endDate])
+                    ->selectRaw('
+                        cat_items.date as date,
+                        COALESCE(SUM(cat_items.category_revenue), 0) as revenue,
+                        COUNT(DISTINCT o.id) as orders_count,
+                        COUNT(DISTINCT o.customer_id) as customers_count,
+                        COALESCE(AVG(cat_items.category_revenue), 0) as avg_order_value
+                    ')
+                    ->groupBy('cat_items.date')
+                    ->orderBy('cat_items.date', 'ASC')
+                    ->get();
+            } else {
+                // Semua kategori - dari total_amount
+                $revenueData = DB::table('orders')
+                    ->where('payment_status', 'Paid')
+                    ->whereBetween('created_at', [$startDate, $endDate])
+                    ->selectRaw('
+                        DATE(created_at) as date,
+                        COALESCE(SUM(total_amount), 0) as revenue,
+                        COUNT(*) as orders_count,
+                        COUNT(DISTINCT customer_id) as customers_count,
+                        COALESCE(AVG(total_amount), 0) as avg_order_value
+                    ')
+                    ->groupBy('date')
+                    ->orderBy('date', 'ASC')
+                    ->get();
             }
-
-            $query->where('o.payment_status', 'Paid')
-                  ->whereBetween('o.created_at', [$startDate, $endDate]);
-
-            // Get revenue data
-            $revenueData = $query->selectRaw('
-                DATE(o.created_at) as date,
-                COALESCE(SUM(o.total_amount), 0) as revenue,
-                COUNT(DISTINCT o.id) as orders_count,
-                COUNT(DISTINCT o.customer_id) as customers_count,
-                COALESCE(AVG(o.total_amount), 0) as avg_order_value
-            ')
-            ->groupBy('date')
-            ->orderBy('date', 'ASC')
-            ->get();
 
             // Calculate growth rate
             $previousPeriod = $this->getPreviousPeriodRevenue(
                 $startDate->copy()->subDays($startDate->diffInDays($endDate) + 1),
-                $startDate->copy()->subDay()
+                $startDate->copy()->subDay(),
+                $categoryId
             );
 
             $currentTotal = $revenueData->sum('revenue');
@@ -168,6 +192,8 @@ class ReportController extends Controller
             ], 500);
         }
     }
+
+
 
     /**
      * Get menu performance report
@@ -530,20 +556,27 @@ class ReportController extends Controller
 
     private function getPaymentMethodBreakdown($startDate, $endDate)
     {
-        // Note: Assuming payment_method field exists in payment_logs or orders
-        // Adjust query based on actual schema
         $data = DB::table('orders')
             ->where('payment_status', 'Paid')
             ->whereBetween('created_at', [$startDate, $endDate])
-            ->selectRaw('
+            ->selectRaw("
                 CASE 
-                    WHEN payment_reference IS NOT NULL THEN \'Online\'
-                    ELSE \'Cash\'
+                    WHEN payment_reference LIKE 'CASH-%' THEN 'Cash'
+                    WHEN payment_reference LIKE 'SIM_%' THEN 'Online'
+                    WHEN payment_reference IS NULL THEN 'Cash'
+                    ELSE 'Online'
                 END as method,
                 COUNT(*) as count,
                 COALESCE(SUM(total_amount), 0) as amount
-            ')
-            ->groupBy('method')
+            ")
+            ->groupByRaw("
+                CASE 
+                    WHEN payment_reference LIKE 'CASH-%' THEN 'Cash'
+                    WHEN payment_reference LIKE 'SIM_%' THEN 'Online'
+                    WHEN payment_reference IS NULL THEN 'Cash'
+                    ELSE 'Online'
+                END
+            ")
             ->get();
 
         $total = $data->sum('amount');
@@ -554,7 +587,7 @@ class ReportController extends Controller
                 : 0;
 
             return [
-                'method' => $item->method,
+                'method' => $item->method ?? 'Cash',
                 'count' => (int) $item->count,
                 'amount' => (float) $item->amount,
                 'percentage' => $percentage
@@ -562,8 +595,18 @@ class ReportController extends Controller
         })->toArray();
     }
 
-    private function getPreviousPeriodRevenue($startDate, $endDate)
+    private function getPreviousPeriodRevenue($startDate, $endDate, $categoryId = null)
     {
+        if ($categoryId) {
+            return DB::table('order_items as oi')
+                ->join('menus as m', 'oi.menu_id', '=', 'm.id')
+                ->join('orders as o', 'oi.order_id', '=', 'o.id')
+                ->where('m.category_id', $categoryId)
+                ->where('o.payment_status', 'Paid')
+                ->whereBetween('o.created_at', [$startDate, $endDate])
+                ->sum('oi.subtotal') ?? 0;
+        }
+        
         return DB::table('orders')
             ->where('payment_status', 'Paid')
             ->whereBetween('created_at', [$startDate, $endDate])
@@ -770,18 +813,93 @@ class ReportController extends Controller
      */
     private function getAggregatedData($startDate, $endDate, $categoryId = null, $viewType = '1y')
     {
-        $query = DB::table('orders as o');
-        
+        // 🔥 KEY FIX: Selalu hitung dari order_items untuk consistency
+        $baseQuery = DB::table('orders as o')
+            ->where('o.payment_status', 'Paid')
+            ->whereBetween('o.created_at', [$startDate, $endDate]);
+
         if ($categoryId) {
-            $query->join('order_items as oi', 'o.id', '=', 'oi.order_id')
-                ->join('menus as m', 'oi.menu_id', '=', 'm.id')
-                ->where('m.category_id', $categoryId);
+            // ✅ FIXED: Gunakan subquery untuk get order IDs yang punya items dari category ini
+            // Lalu hitung proportional revenue
+            
+            if ($viewType === '5y') {
+                $data = DB::table('orders as o')
+                    ->join(DB::raw("(
+                        SELECT 
+                            oi.order_id,
+                            SUM(oi.subtotal) as category_revenue
+                        FROM order_items oi
+                        JOIN menus m ON oi.menu_id = m.id
+                        WHERE m.category_id = {$categoryId}
+                        GROUP BY oi.order_id
+                    ) as cat_items"), 'o.id', '=', 'cat_items.order_id')
+                    ->where('o.payment_status', 'Paid')
+                    ->whereBetween('o.created_at', [$startDate, $endDate])
+                    ->selectRaw("
+                        EXTRACT(YEAR FROM o.created_at)::INTEGER as year,
+                        COALESCE(SUM(cat_items.category_revenue), 0) as revenue,
+                        COUNT(DISTINCT o.id) as orders_count,
+                        COUNT(DISTINCT o.customer_id) as customers_count,
+                        COALESCE(AVG(cat_items.category_revenue), 0) as avg_order_value
+                    ")
+                    ->groupByRaw('EXTRACT(YEAR FROM o.created_at)')
+                    ->orderByRaw('EXTRACT(YEAR FROM o.created_at) ASC')
+                    ->get();
+                
+                return $data->map(function($item) {
+                    return [
+                        'period' => (string) $item->year,
+                        'year' => (int) $item->year,
+                        'revenue' => (float) $item->revenue,
+                        'orders_count' => (int) $item->orders_count,
+                        'customers_count' => (int) $item->customers_count,
+                        'avg_order_value' => (float) $item->avg_order_value
+                    ];
+                })->toArray();
+            }
+            
+            // For monthly views
+            $data = DB::table('orders as o')
+                ->join(DB::raw("(
+                    SELECT 
+                        oi.order_id,
+                        SUM(oi.subtotal) as category_revenue
+                    FROM order_items oi
+                    JOIN menus m ON oi.menu_id = m.id
+                    WHERE m.category_id = {$categoryId}
+                    GROUP BY oi.order_id
+                ) as cat_items"), 'o.id', '=', 'cat_items.order_id')
+                ->where('o.payment_status', 'Paid')
+                ->whereBetween('o.created_at', [$startDate, $endDate])
+                ->selectRaw("
+                    EXTRACT(YEAR FROM o.created_at)::INTEGER as year,
+                    EXTRACT(MONTH FROM o.created_at)::INTEGER as month,
+                    TRIM(TO_CHAR(o.created_at, 'Mon')) as month_short,
+                    COALESCE(SUM(cat_items.category_revenue), 0) as revenue,
+                    COUNT(DISTINCT o.id) as orders_count,
+                    COUNT(DISTINCT o.customer_id) as customers_count,
+                    COALESCE(AVG(cat_items.category_revenue), 0) as avg_order_value
+                ")
+                ->groupByRaw('EXTRACT(YEAR FROM o.created_at), EXTRACT(MONTH FROM o.created_at), TO_CHAR(o.created_at, \'Mon\')')
+                ->orderByRaw('EXTRACT(YEAR FROM o.created_at) ASC, EXTRACT(MONTH FROM o.created_at) ASC')
+                ->get();
+            
+            return $data->map(function($item) {
+                return [
+                    'period' => trim($item->month_short) . ' ' . $item->year,
+                    'year' => (int) $item->year,
+                    'month' => (int) $item->month,
+                    'revenue' => (float) $item->revenue,
+                    'orders_count' => (int) $item->orders_count,
+                    'customers_count' => (int) $item->customers_count,
+                    'avg_order_value' => (float) $item->avg_order_value
+                ];
+            })->toArray();
         }
         
-        // For 5y view - group by YEAR
+        // ✅ Semua kategori - hitung dari total_amount orders
         if ($viewType === '5y') {
-            $data = $query->where('o.payment_status', 'Paid')
-                ->whereBetween('o.created_at', [$startDate, $endDate])
+            $data = $baseQuery
                 ->selectRaw("
                     EXTRACT(YEAR FROM o.created_at)::INTEGER as year,
                     COALESCE(SUM(o.total_amount), 0) as revenue,
@@ -805,9 +923,8 @@ class ReportController extends Controller
             })->toArray();
         }
         
-        // For 3m, 6m, 1y - group by MONTH
-        $data = $query->where('o.payment_status', 'Paid')
-            ->whereBetween('o.created_at', [$startDate, $endDate])
+        // Monthly view
+        $data = $baseQuery
             ->selectRaw("
                 EXTRACT(YEAR FROM o.created_at)::INTEGER as year,
                 EXTRACT(MONTH FROM o.created_at)::INTEGER as month,
@@ -833,6 +950,8 @@ class ReportController extends Controller
             ];
         })->toArray();
     }
+
+
 
     /**
      * Calculate comparison between two periods
